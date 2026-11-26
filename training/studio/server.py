@@ -66,6 +66,21 @@ def run_studio(host: str = "127.0.0.1", port: int = 8765) -> None:
                 self.send_error(404)
 
         def do_POST(self):
+            if self.path == "/api/feedback":
+                length = int(self.headers.get("Content-Length", "0"))
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    data = json.loads(raw.decode())
+                except json.JSONDecodeError:
+                    self._json(400, {"ok": False, "error": "Invalid JSON"})
+                    return
+                cats = data.get("categories") or []
+                desc = str(data.get("description", ""))
+                self._json(200, mgr.submit_feedback(cats, desc))
+                return
+            if self.path == "/api/rollback":
+                self._json(200, mgr.rollback_policy())
+                return
             if self.path != "/api/control":
                 self.send_error(404)
                 return

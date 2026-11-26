@@ -26,6 +26,8 @@ class EpisodeStats:
     ammo_used: int = 0
     wasted_shots: int = 0
     aimed_shots: int = 0
+    weapon_switches: int = 0
+    medikits_collected: int = 0
     distance_travelled: float = 0.0
     forward_steps: int = 0
     turn_steps: int = 0
@@ -36,10 +38,19 @@ class EpisodeStats:
 class DoomRewardShaper:
     """Dense reward shaper for training using privileged_state() and obs (never exposed to policy)."""
 
-    def __init__(self, cell_size: float = 64.0, stuck_window: int = 16, stuck_min_dist: float = 12.0):
+    def __init__(
+        self,
+        cell_size: float = 64.0,
+        stuck_window: int = 16,
+        stuck_min_dist: float = 12.0,
+        low_health_threshold: float = 45.0,
+        low_ammo_threshold: int = 5,
+    ):
         self.cell_size = cell_size
         self.stuck_window = stuck_window
         self.stuck_min_dist = stuck_min_dist
+        self.low_health_threshold = low_health_threshold
+        self.low_ammo_threshold = low_ammo_threshold
         self._prev: dict | None = None
         self._visited: set[tuple[int, int]] = set()
         self._moved_sectors: set[int] = set()
@@ -49,7 +60,10 @@ class DoomRewardShaper:
         self._repeat_count: int = 0
         self._prev_enemy_cos: float | None = None
         self._prev_ammo: float | None = None
+        self._prev_total_ammo: float | None = None
         self._no_enemy_turn_steps: int = 0
+        self._recent_dmg_steps: int = 0
+        self._wpn_switch_cd: int = 0
         self._discovered_enemies: set[int] = set()
         self._stats = EpisodeStats()
 
@@ -61,8 +75,11 @@ class DoomRewardShaper:
         self._last_action = None
         self._repeat_count = 0
         self._no_enemy_turn_steps = 0
+        self._recent_dmg_steps = 0
+        self._wpn_switch_cd = 0
         self._prev_enemy_cos = None
         self._prev_ammo = float(obs["vitals"][3]) if obs is not None else None
+        self._prev_total_ammo = float(np.sum(obs["vitals"][4:8])) if obs is not None else None
         self._discovered_enemies.clear()
 
         ceil = priv_state.get("sector_ceiling")
@@ -98,7 +115,8 @@ class DoomRewardShaper:
 
         d_hp = priv_state["health"] - self._prev["health"]
         if d_hp > 0:
-            r += 0.03 * d_hp
+            r += 2.0 if self._prev["health"] <= self.low_health_threshold else 0.04 * d_hp
+            self._stats.medikits_collected += 1
 
         best_cos = -1.0
         best_sin = 0.0
@@ -129,12 +147,19 @@ class DoomRewardShaper:
                     improvement = best_cos - self._prev_enemy_cos
                     r += 2.0 * improvement
 
-                # --- CENTERED AIM BONUS ---
+                # --- CENTERED AIM BONUS & STEADY COMBAT CONTROL ---
                 if best_cos >= 0.985:
                     r += 0.08  # tight lock
-                    # Extra reward for holding steady (not turning when already aimed)
-                    if action is not None and int(action[4]) == 0 and int(action[5]) == 0:
-                        r += 0.06
+                    if action is not None:
+                        turning_now = (int(action[4]) == 1) or (int(action[5]) == 1)
+                        strafing_now = (int(action[2]) == 1) or (int(action[3]) == 1)
+                        fwd_now = int(action[0]) == 1
+                        if not turning_now and (not fwd_now or best_dist > 0.38):
+                            r += 0.10  # hold steady aim instead of overshooting!
+                        elif turning_now:
+                            r -= 0.10  # don't rotate away when already aligned!
+                        if strafing_now and self._recent_dmg_steps == 0:
+                            r -= 0.05  # avoid unnecessary strafing when aligned & unharmed
                 elif best_cos >= 0.95:
                     r += 0.03  # close to centered
 
@@ -151,10 +176,18 @@ class DoomRewardShaper:
                         elif int(action[4]) == 1 and int(action[5]) == 0:
                             r -= 0.18  # Wrong: turning away from enemy
 
-                # --- APPROACH REWARD: move toward distant enemies (best_dist is normalized [0,1] by 2048) ---
-                if best_cos >= 0.94 and best_dist > 0.15 and action is not None:
-                    if int(action[0]) == 1:
-                        r += 0.05  # advance toward aimed enemy
+                # --- CONTEXT-AWARE COMBAT MOVEMENT SPEED ---
+                if action is not None:
+                    if best_cos >= 0.94 and best_dist > 0.38:
+                        if int(action[0]) == 1 and int(action[1]) == 0:
+                            r += 0.06  # approach distant enemy
+                    elif best_dist <= 0.35 and best_cos >= 0.95:
+                        # In effective combat range: slow down & hold aim instead of rushing past!
+                        if int(action[0]) == 1:
+                            r -= 0.20 if best_dist < 0.22 else 0.12
+                        # Allow controlled strafe repositioning only when taking damage
+                        if self._recent_dmg_steps > 0 and (int(action[2]) == 1 or int(action[3]) == 1):
+                            r += 0.06
 
                 self._prev_enemy_cos = best_cos
                 self._no_enemy_turn_steps = 0
@@ -172,10 +205,60 @@ class DoomRewardShaper:
             else:
                 self._prev_enemy_cos = None
 
-            # --- FIRING DISCIPLINE ---
+            # --- FIRING DISCIPLINE & EMPTY-WEAPON GUARD ---
+            cur_wpn = int(round(float(obs["vitals"][2])))
+            is_empty = (cur_wpn <= 1) or (0.0 <= cur_ammo <= 0.5)
+            other_ammo_avail = (
+                (float(obs["vitals"][5]) > 0 or float(obs["vitals"][6]) > 0 or float(obs["vitals"][7]) > 0)
+                if cur_wpn in (2, 4)
+                else (
+                    (float(obs["vitals"][4]) > 0 or float(obs["vitals"][6]) > 0 or float(obs["vitals"][7]) > 0)
+                    if cur_wpn == 3
+                    else float(np.sum(obs["vitals"][4:8])) > 0
+                )
+            )
+            if self._wpn_switch_cd > 0:
+                self._wpn_switch_cd -= 1
+            if action is not None and int(action[8]) == 1:
+                self._stats.weapon_switches += 1
+                if is_empty and other_ammo_avail and self._wpn_switch_cd == 0:
+                    r += 0.65  # smart weapon switch when current weapon is empty/melee!
+                    self._wpn_switch_cd = 3
+                elif not is_empty and cur_ammo > self.low_ammo_threshold:
+                    r -= 0.15  # avoid pointless weapon cycling
+
+            tot_ammo = float(np.sum(obs["vitals"][4:8]))
+            if self._prev_total_ammo is not None and tot_ammo > self._prev_total_ammo:
+                r += 0.80  # ammo pickup collected
+            self._prev_total_ammo = tot_ammo
+
+            # Health-recovery priority: when health <= threshold & medikit visible/remembered
+            if priv_state["health"] <= self.low_health_threshold and mem_summary is not None and float(mem_summary[36]) > 0.5 and action is not None:
+                med_sin, med_cos = float(mem_summary[34]), float(mem_summary[35])
+                if med_cos >= 0.90:
+                    if int(action[0]) == 1 and int(action[1]) == 0:
+                        r += 0.22  # move toward medikit
+                elif med_sin > 0.08 and int(action[4]) == 1 and int(action[5]) == 0:
+                    r += 0.18
+                elif med_sin < -0.08 and int(action[5]) == 1 and int(action[4]) == 0:
+                    r += 0.18
+
+            # Ammo-pickup priority when low ammo & no aligned enemy
+            if cur_ammo <= self.low_ammo_threshold and (not enemy_visible or best_cos < 0.95) and mem_summary is not None and float(mem_summary[42]) > 0.5 and action is not None:
+                a_sin = float(mem_summary[41])
+                if abs(a_sin) < 0.35 and int(action[0]) == 1:
+                    r += 0.14
+                elif a_sin > 0.10 and int(action[4]) == 1:
+                    r += 0.12
+                elif a_sin < -0.10 and int(action[5]) == 1:
+                    r += 0.12
+
             fired = (ammo_spent > 0) or (action is not None and int(action[6]) == 1)
             if fired:
-                if enemy_visible and best_cos >= 0.982:
+                if is_empty and other_ammo_avail:
+                    r -= 0.25  # don't fire empty weapon when loaded weapon exists
+                    self._stats.wasted_shots += 1
+                elif enemy_visible and best_cos >= 0.982:
                     # Good shot: enemy tightly centered and visible (~10 deg)
                     r += 0.35 if best_cos >= 0.994 else 0.18
                     self._stats.aimed_shots += 1
@@ -196,6 +279,9 @@ class DoomRewardShaper:
         d_dmg = priv_state["damage_taken"] - self._prev["damage_taken"]
         if d_dmg > 0:
             r -= 0.04 * d_dmg
+            self._recent_dmg_steps = 5
+        elif self._recent_dmg_steps > 0:
+            self._recent_dmg_steps -= 1
 
         # 3. Keycards & door progression
         d_keys = int(priv_state["keys"].sum() - self._prev["keys"].sum())
@@ -249,17 +335,32 @@ class DoomRewardShaper:
             else:
                 turning = (int(action[4]) == 1) or (int(action[5]) == 1)
 
-                # Look once (<=3 steps), then advance forward when path is clear instead of turning backward
+                # Look once (<=2 steps), then advance forward when path is clear instead of turning/oscillating
                 if turning and (step_disp < 3.0 or front_ray > 0.22):
                     self._no_enemy_turn_steps += 1
-                    if self._no_enemy_turn_steps > 3:
-                        r -= 0.10  # stop turning, move forward
+                    if self._no_enemy_turn_steps > 2:
+                        r -= 0.14  # stop spinning, move forward
                 else:
                     self._no_enemy_turn_steps = 0
 
-                # Reward forward movement when path is clear and no enemies to engage
-                if int(action[0]) == 1 and int(action[1]) == 0 and front_ray > 0.12:
-                    r += 0.12 * min(step_disp / 10.0, 1.0)
+                # Penalize L<->R turn oscillation when no enemy is tracked
+                if self._last_action is not None:
+                    if (int(action[4]) == 1 and int(self._last_action[5]) == 1) or (
+                        int(action[5]) == 1 and int(self._last_action[4]) == 1
+                    ):
+                        r -= 0.12
+
+                # Reward forward movement when path is clear and area is cleared
+                if int(action[0]) == 1 and int(action[1]) == 0 and front_ray > 0.14:
+                    r += 0.16 * min(step_disp / 10.0, 1.0)
+                elif front_ray <= 0.18 and obs is not None:
+                    # Obstacle ahead: reward turning toward the more open side
+                    left_clear = float(np.mean(obs["rays"]["distance"][1:9]))
+                    right_clear = float(np.mean(obs["rays"]["distance"][-8:]))
+                    if left_clear >= right_clear and int(action[4]) == 1:
+                        r += 0.08
+                    elif right_clear > left_clear and int(action[5]) == 1:
+                        r += 0.08
 
                 # Strongly penalize moving backward when no enemy is visible
                 if int(action[1]) == 1:

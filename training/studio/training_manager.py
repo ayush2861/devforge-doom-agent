@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
+import math
 import threading
 import time
 from collections import deque
@@ -21,6 +23,14 @@ from training.models.doom_model import ESRHAAgentModel, obs_to_tensors
 from training.models.policy import STRATEGIES
 from training.rewards.reward import DoomRewardShaper
 from training.rollout import RolloutBuffer
+from training.studio.feedback_engine import (
+    PROBLEM_CATEGORIES,
+    FeedbackShapingModifiers,
+    apply_modifiers_to_shaper,
+    check_candidate_improvement,
+    diagnose_feedback,
+    evaluate_policy_episodes,
+)
 from training.studio.map_catalog import ROOT, discover_maps
 
 EXPERIMENTS_DIR = ROOT / "training" / "runs" / "studio_experiments"
@@ -33,17 +43,17 @@ class TrainStudioConfig:
     map_id: str = "vizdoom_corridor"
     num_episodes: int = 200
     max_ticks: int = 1400
-    lr: float = 3e-4
+    lr: float = 2.5e-5
     batch_seqs: int = 8
-    ppo_epochs: int = 4
+    ppo_epochs: int = 2
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    ent_coef: float = 0.01
+    ent_coef: float = 0.001
     checkpoint_interval: int = 10
     seed: int = 42
     device: str = "cpu"
-    step_delay_ms: int = 80  # ~12.5 steps/s (smooth ~1.4x real-time DOOM speed; 0 = max speed)
-    deterministic_eval: bool = False  # True = clean deterministic playback without stochastic jitter
+    step_delay_ms: int = 115  # ~8.7 steps/s (1x real-time DOOM speed)
+    deterministic_eval: bool = True  # True = clean deterministic playback without corrupting trained weights
 
 
 def _encode_jpeg(rgb: np.ndarray) -> bytes:
@@ -87,10 +97,24 @@ class TrainingManager:
 
         self._env = None
         self._model: ESRHAAgentModel | None = None
+        self._train_model: ESRHAAgentModel | None = None
         self._trainer: PPOTrainer | None = None
         self._shaper = DoomRewardShaper()
         self._hidden: torch.Tensor | None = None
         self._prev_action = np.zeros((1, len(S.BUTTONS)), dtype=np.float32)
+
+        # Dual-policy, rolling history, & continuous online feedback learning state
+        self._gameplay_history: deque[dict] = deque(maxlen=256)
+        self._feedback_modifiers = FeedbackShapingModifiers()
+        self._feedback_lock = threading.Lock()
+        self._feedback_busy = False
+        self._pending_promotion: dict | None = None
+        self._prev_stable_snapshot: dict | None = None
+        self.policy_version_num = 0
+        self.policy_version = "v13.0"
+        self.latest_policy_version = "v13.0"
+        self.learning_status: dict = {"status": "Idle", "active_report_id": None}
+        self.problem_history: list[dict] = []
 
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -125,6 +149,14 @@ class TrainingManager:
             "aimed_shots": 0, "wasted_shots": 0, "ammo_used": 0,
             "attack_pct": 0.0, "explore_pct": 0.0,
             "move_count": 0, "turn_count": 0, "strafe_count": 0,
+            "low_health_warning": False, "medikit_detected": False,
+            "medikit_target": "-", "hp_recovery": "-",
+            "weapon_name": "Pistol", "low_ammo_warning": False,
+            "reload_supported": False, "weapon_switches": 0,
+            "target_info": "-", "target_aligned": False,
+            "firing_justified": False, "shots_without_target": 0, "shots_after_kill": 0,
+            "behavior_mode": "Exploration", "explore_dir": "Forward",
+            "repeated_turn": False, "exit_reached": False,
         }
         self.memory_viz = {
             "slots": [],
@@ -145,6 +177,12 @@ class TrainingManager:
         self._ep_turn = 0
         self._ep_strafe = 0
         self._prev_hp = 100.0
+        self._hp_before_med = None
+        self._hp_after_med = None
+        self._ep_wpn_switches = 0
+        self._ep_shots_no_tgt = 0
+        self._ep_shots_after_kill = 0
+        self._steps_since_kill = 999
         self._prev_items = 0
         self._prev_enemy_seen = False
 
@@ -164,12 +202,14 @@ class TrainingManager:
     def _init_model_if_needed(self, force_fresh: bool = False) -> None:
         if self._model is None or force_fresh:
             self._model = ESRHAAgentModel(hidden_dim=256, use_visual=False, use_depth=False).to(self.config.device)
+            self._train_model = ESRHAAgentModel(hidden_dim=256, use_visual=False, use_depth=False).to(self.config.device)
+            self._train_model.load_state_dict(copy.deepcopy(self._model.state_dict()))
             cfg = PPOConfig(
                 lr=self.config.lr, gamma=self.config.gamma, gae_lambda=self.config.gae_lambda,
                 ent_coef=self.config.ent_coef, ppo_epochs=self.config.ppo_epochs,
-                batch_seqs=self.config.batch_seqs, seq_len=32,
+                batch_seqs=self.config.batch_seqs, seq_len=32, target_kl=0.015,
             )
-            self._trainer = PPOTrainer(self._model, cfg, total_updates=max(10, self.config.num_episodes), device=self.config.device)
+            self._trainer = PPOTrainer(self._train_model, cfg, total_updates=max(10, self.config.num_episodes), device=self.config.device)
             self._hidden = self._model.init_hidden(1, self.config.device)
             self._prev_action = np.zeros((1, len(S.BUTTONS)), dtype=np.float32)
             self.current_checkpoint = "fresh_esrha_256"
@@ -198,6 +238,12 @@ class TrainingManager:
         self._ep_turn = 0
         self._ep_strafe = 0
         self._prev_hp = float(obs["vitals"][0])
+        self._hp_before_med = None
+        self._hp_after_med = None
+        self._ep_wpn_switches = 0
+        self._ep_shots_no_tgt = 0
+        self._ep_shots_after_kill = 0
+        self._steps_since_kill = 999
         self._prev_items = 0
         self._prev_enemy_seen = False
         if self._model is not None:
@@ -213,6 +259,25 @@ class TrainingManager:
         ve = obs["visible_entities"]
         mask = ve["mask"].astype(bool)
         vis_enemies = sum(1 for i in np.flatnonzero(mask) if int(ve["entity_type"][i]) in _ENEMY_TYPE_IDS)
+        vis_meds = [i for i in np.flatnonzero(mask) if int(ve["entity_type"][i]) == 5]
+        enemy_idxs = [i for i in np.flatnonzero(mask) if int(ve["entity_type"][i]) in _ENEMY_TYPE_IDS]
+        wpn_names = {1: "Fist/Melee", 2: "Pistol", 3: "Shotgun", 4: "Chaingun", 5: "Rocket", 6: "Plasma", 7: "BFG"}
+        cur_wpn = int(v[2])
+        cur_ammo = float(v[3])
+        med_str = "-"
+        if vis_meds:
+            bm = min(vis_meds, key=lambda i: float(ve["features"][i, 0]))
+            md, ms = float(ve["features"][bm, 0]) * 1024.0, math.degrees(math.asin(max(-1.0, min(1.0, float(ve["features"][bm, 1])))))
+            med_str = f"d={md:.0f}u ang={ms:+.0f}°"
+        tgt_str, tgt_aligned = "-", False
+        if enemy_idxs:
+            be = max(enemy_idxs, key=lambda i: float(ve["features"][i, 2]))
+            td = float(ve["features"][be, 0]) * 1024.0
+            ts = math.degrees(math.asin(max(-1.0, min(1.0, float(ve["features"][be, 1])))))
+            tc = float(ve["features"][be, 2])
+            tgt_aligned = tc >= 0.982
+            tgt_str = f"d={td:.0f}u ang={ts:+.0f}° cos={tc:.3f}"
+        hp_rec_str = f"{self._hp_before_med:.0f}% -> {self._hp_after_med:.0f}%" if self._hp_before_med is not None else "-"
 
         self.hud.update({
             "health": float(v[0]), "armor": float(v[1]),
@@ -242,6 +307,30 @@ class TrainingManager:
             "turn_count": self._ep_turn,
             "strafe_count": self._ep_strafe,
             "distance_travelled": round(float(self._shaper._stats.distance_travelled), 1),
+            "low_health_warning": float(v[0]) <= 45.0,
+            "medikit_detected": len(vis_meds) > 0,
+            "medikit_target": med_str,
+            "hp_recovery": hp_rec_str,
+            "weapon_name": wpn_names.get(cur_wpn, f"Slot {cur_wpn}"),
+            "low_ammo_warning": (cur_wpn <= 1) or (0.0 <= cur_ammo <= 5.0),
+            "reload_supported": False,
+            "weapon_switches": self._ep_wpn_switches,
+            "target_info": tgt_str,
+            "target_aligned": tgt_aligned,
+            "firing_justified": bool(enemy_idxs and tgt_aligned and not ((cur_wpn <= 1) or (0.0 <= cur_ammo <= 0.5))),
+            "shots_without_target": self._ep_shots_no_tgt,
+            "shots_after_kill": self._ep_shots_after_kill,
+            "behavior_mode": (
+                "Recovery" if float(v[0]) <= 45.0 and len(vis_meds) > 0
+                else ("Combat" if vis_enemies > 0
+                      else ("Re-engagement" if self.memory_viz.get("alive_count", 0) > 0 else "Exploration"))
+            ),
+            "explore_dir": (
+                "Forward Clear" if float(obs["rays"]["distance"][0]) > 0.22
+                else ("Turn Left (Open)" if float(np.mean(obs["rays"]["distance"][1:9])) >= float(np.mean(obs["rays"]["distance"][-8:])) else "Turn Right (Open)")
+            ),
+            "repeated_turn": bool(self._shaper._no_enemy_turn_steps > 2),
+            "exit_reached": bool(priv.get("exit_reached", False)),
         })
         if self.ep_step % 4 == 0:
             self.history["fwd_probs"].append(round(float(probs[0]), 3))
@@ -433,9 +522,15 @@ class TrainingManager:
                 use_visual=bool(mcfg.get("use_visual", False)),
                 use_depth=bool(mcfg.get("use_depth", False)),
             ).to(self.config.device)
-            cfg = PPOConfig(lr=self.config.lr, gamma=self.config.gamma, gae_lambda=self.config.gae_lambda, ent_coef=self.config.ent_coef)
-            self._trainer = PPOTrainer(self._model, cfg, total_updates=max(10, self.config.num_episodes), device=self.config.device)
+            self._train_model = ESRHAAgentModel(
+                hidden_dim=int(mcfg.get("hidden_dim", 256)),
+                use_visual=bool(mcfg.get("use_visual", False)),
+                use_depth=bool(mcfg.get("use_depth", False)),
+            ).to(self.config.device)
+            cfg = PPOConfig(lr=self.config.lr, gamma=self.config.gamma, gae_lambda=self.config.gae_lambda, ent_coef=self.config.ent_coef, ppo_epochs=self.config.ppo_epochs, target_kl=0.015)
+            self._trainer = PPOTrainer(self._train_model, cfg, total_updates=max(10, self.config.num_episodes), device=self.config.device)
             self._model.load_state_dict(ckpt["model_state_dict"])
+            self._train_model.load_state_dict(copy.deepcopy(ckpt["model_state_dict"]))
             if resume_optimizer and "optimizer_state_dict" in ckpt:
                 self._trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
                 if "scheduler_state_dict" in ckpt:
@@ -541,11 +636,25 @@ class TrainingManager:
                 if d_kills > 0:
                     self.ep_kills += d_kills
                     self.total_kills += d_kills
+                    self._steps_since_kill = 0
                     self._log("info", f"Enemy killed! (ep_kills={self.ep_kills}, total_kills={self.total_kills})")
+                else:
+                    self._steps_since_kill += 1
+                if action_int[6]:
+                    if not self.behavior["enemy_detected"]:
+                        self._ep_shots_no_tgt += 1
+                        if self._steps_since_kill <= 5:
+                            self._ep_shots_after_kill += 1
 
                 if priv["health"] < self._prev_hp:
                     self._log("warn", f"Player damaged: HP {self._prev_hp:.0f} -> {priv['health']:.0f}")
+                elif priv["health"] > self._prev_hp:
+                    self._hp_before_med = self._prev_hp
+                    self._hp_after_med = float(priv["health"])
+                    self._log("info", f"Medikit collected: HP {self._prev_hp:.0f} -> {priv['health']:.0f}")
                 self._prev_hp = float(priv["health"])
+                if action_int[8]:
+                    self._ep_wpn_switches += 1
 
                 if int(priv["items"]) > prev_items:
                     self._log("info", "Player collected an item.")
@@ -565,11 +674,30 @@ class TrainingManager:
                     self._ep_strafe += 1
 
                 done = bool(term or trunc)
-                buf.add(
-                    [obs], self._prev_action, action_np,
-                    log_prob_t.cpu().numpy(), value_t.cpu().numpy(),
-                    np.array([r], np.float32), np.array([float(done)], np.float32), hid_in,
-                )
+                if not self.config.deterministic_eval:
+                    buf.add(
+                        [obs], self._prev_action, action_np,
+                        log_prob_t.cpu().numpy(), value_t.cpu().numpy(),
+                        np.array([r], np.float32), np.array([float(done)], np.float32), hid_in,
+                    )
+
+                self._gameplay_history.append({
+                    "step": self.total_steps,
+                    "episode": self.episode_num,
+                    "map_id": self.config.map_id,
+                    "health": float(priv["health"]),
+                    "armor": float(obs["vitals"][1]),
+                    "weapon": int(obs["vitals"][2]),
+                    "ammo": float(obs["vitals"][3]),
+                    "kills": int(priv["kills"]),
+                    "visible_enemies": int(self.behavior["visible_enemies"]),
+                    "action": [int(x) for x in action_int],
+                    "action_probs": [round(float(p), 3) for p in probs_np],
+                    "reward": round(float(r), 4),
+                    "disp": round(float(math.hypot(obs["vitals"][14], obs["vitals"][15])), 2),
+                    "front_ray": round(float(obs["rays"]["distance"][0]), 3),
+                    "cells_visited": int(self._shaper._stats.cells_visited),
+                })
 
                 self._hidden = out["next_hidden"]
                 self._prev_action = action_np
@@ -584,16 +712,19 @@ class TrainingManager:
                     time.sleep(self.config.step_delay_ms / 1000.0)
 
                 if buf.ptr >= rollout_steps:
-                    with torch.no_grad():
-                        lo = self._model.forward_step(
-                            obs_to_tensors(obs, device=self.config.device),
-                            hidden=self._hidden,
-                            prev_action=torch.as_tensor(self._prev_action, dtype=torch.float32, device=self.config.device),
-                        )
-                    t_stats = self._trainer.update(buf, lo["value"].cpu().numpy(), np.array([float(done)], np.float32))
-                    self.update_idx += 1
-                    self.history["policy_losses"].append(round(t_stats["policy_loss"], 5))
-                    self.history["value_losses"].append(round(t_stats["value_loss"], 5))
+                    if not self.config.deterministic_eval and self._train_model is not None:
+                        self._train_model.load_state_dict(copy.deepcopy(self._model.state_dict()))
+                        with torch.no_grad():
+                            lo = self._train_model.forward_step(
+                                obs_to_tensors(obs, device=self.config.device),
+                                hidden=self._hidden,
+                                prev_action=torch.as_tensor(self._prev_action, dtype=torch.float32, device=self.config.device),
+                            )
+                        t_stats = self._trainer.update(buf, lo["value"].cpu().numpy(), np.array([float(done)], np.float32))
+                        self._model.load_state_dict(copy.deepcopy(self._train_model.state_dict()))
+                        self.update_idx += 1
+                        self.history["policy_losses"].append(round(t_stats["policy_loss"], 5))
+                        self.history["value_losses"].append(round(t_stats["value_loss"], 5))
                     buf = RolloutBuffer(rollout_steps, 1, self._model.state_dim)
 
                 if done:
@@ -616,6 +747,19 @@ class TrainingManager:
                         self.save_checkpoint("latest")
 
                     self.episode_num += 1
+                    if self._pending_promotion is not None:
+                        promo = self._pending_promotion
+                        self._pending_promotion = None
+                        self._model.load_state_dict(copy.deepcopy(promo["state_dict"]))
+                        self.policy_version = promo["new_version"]
+                        self.current_checkpoint = promo.get("ckpt_name", self.current_checkpoint)
+                        for r_item in self.problem_history:
+                            if r_item["id"] == promo["report"]["id"]:
+                                r_item["status"] = "Improvement verified"
+                                r_item["applied"] = True
+                                self.learning_status = dict(r_item)
+                                break
+                        self._log("info", f"Applied updated policy {self.policy_version} at episode boundary.")
                     if self.episode_num <= target_episodes and not self._stop_event.is_set():
                         obs, _ = self._env.reset(seed=self.config.seed + self.episode_num)
                         self._shaper.reset(self._env.privileged_state(), obs=obs)
@@ -639,6 +783,235 @@ class TrainingManager:
                 self._env = None
                 self.env_status = "Closed"
 
+    # ---------------- Human Feedback & Online Learning ----------------
+    def submit_feedback(self, categories: list[str], description: str = "") -> dict:
+        if not categories and not description.strip():
+            return {"ok": False, "error": "Select at least one problem category or enter a description."}
+        with self._feedback_lock:
+            if self._feedback_busy:
+                return {"ok": False, "error": "An online learning update is already in progress."}
+            self._init_model_if_needed(force_fresh=False)
+            self._feedback_busy = True
+
+        rep_id = len(self.problem_history) + 1
+        ctx = {
+            "map_id": self.config.map_id,
+            "episode": self.episode_num,
+            "step": self.total_steps,
+            "health": self.hud["health"],
+            "armor": self.hud["armor"],
+            "weapon_name": self.behavior.get("weapon_name", "Pistol"),
+            "ammo": self.hud["selected_weapon_ammo"],
+            "kills": self.hud["kills"],
+            "checkpoint": self.current_checkpoint,
+            "policy_version": self.policy_version,
+        }
+        hist_copy = list(self._gameplay_history)
+        report = {
+            "id": rep_id,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "categories": list(categories),
+            "description": description.strip(),
+            "map_id": self.config.map_id,
+            "episode": self.episode_num,
+            "step": self.total_steps,
+            "status": "Feedback received",
+            "origin": "-",
+            "detected_cause": "Analyzing gameplay context...",
+            "learning_action": "Pending",
+            "prev_version": self.policy_version,
+            "new_version": self.policy_version,
+            "before_metrics": None,
+            "after_metrics": None,
+            "verification": "Pending",
+            "applied": False,
+        }
+        self.problem_history.insert(0, report)
+        self.learning_status = dict(report)
+        threading.Thread(
+            target=self._feedback_worker, args=(rep_id, categories, description, hist_copy, ctx), daemon=True
+        ).start()
+        return {"ok": True, "report_id": rep_id}
+
+    def _feedback_worker(self, rep_id: int, categories: list[str], description: str, hist_copy: list[dict], ctx: dict) -> None:
+        report = next((r for r in self.problem_history if r["id"] == rep_id), None)
+        if report is None:
+            with self._feedback_lock:
+                self._feedback_busy = False
+            return
+
+        def _set_status(st: str, **kw):
+            report["status"] = st
+            for k, v in kw.items():
+                report[k] = v
+            self.learning_status = dict(report)
+
+        try:
+            _set_status("Capturing gameplay context")
+            spec = self._map_by_id.get(ctx["map_id"]) or next((m for m in self.maps if m["available"]), None)
+            if spec is None or not spec["available"]:
+                _set_status("Correction unsuccessful", verification="Map not available on disk.")
+                return
+
+            _set_status("Analyzing behaviour")
+            diag, new_mod = diagnose_feedback(categories, description, hist_copy, ctx, self._feedback_modifiers)
+            self._feedback_modifiers = new_mod
+            _set_status(
+                "Problem identified",
+                origin=diag["origin"],
+                detected_cause=diag["detected_cause"],
+                learning_action=diag["learning_action"],
+            )
+
+            # Save stable snapshot for rollback before modifying _train_model
+            self._prev_stable_snapshot = {
+                "model_state_dict": copy.deepcopy(self._model.state_dict()),
+                "train_state_dict": copy.deepcopy(self._train_model.state_dict()),
+                "optimizer_state_dict": copy.deepcopy(self._trainer.optimizer.state_dict()),
+                "scheduler_state_dict": copy.deepcopy(self._trainer.scheduler.state_dict()),
+                "policy_version": self.policy_version,
+                "policy_version_num": self.policy_version_num,
+                "modifiers": copy.deepcopy(self._feedback_modifiers),
+            }
+
+            _set_status("Generating learning signal")
+            before_m = evaluate_policy_episodes(
+                self._model, spec["path"], ticks=min(700, spec["episode_ticks"]), n_episodes=2, seed_base=700, device=self.config.device
+            )
+            _set_status("Online learning update in progress", before_metrics=before_m)
+
+            # Run 2 valid online PPO rollout + optimization updates on _train_model (with retention mix!)
+            self._train_model.load_state_dict(copy.deepcopy(self._model.state_dict()))
+            retention_map = ROOT / "training" / "maps" / "grandmaster" / "center_lr_sym.wad"
+            env_paths = [spec["path"], str(retention_map) if retention_map.is_file() else spec["path"]]
+            n_envs, r_steps = len(env_paths), 256
+            envs = [make_env(p, "MAP01", episode_ticks=min(700, spec["episode_ticks"]), render_buffers=False) for p in env_paths]
+            shapers = [DoomRewardShaper() for _ in envs]
+            obs_l = []
+            for idx_e, e in enumerate(envs):
+                o, _ = e.reset(seed=800 + rep_id * 10 + idx_e)
+                shapers[idx_e].reset(e.privileged_state(), obs=o)
+                obs_l.append(o)
+            hid = self._train_model.init_hidden(n_envs, self.config.device)
+            pa = np.zeros((n_envs, len(S.BUTTONS)), dtype=np.float32)
+
+            try:
+                for upd_i in range(2):
+                    self._train_model.eval()
+                    obuf = RolloutBuffer(r_steps, n_envs, self._train_model.state_dim)
+                    for _ in range(r_steps):
+                        from training.rollout import _batch_obs
+                        ot = _batch_obs(obs_l, self.config.device)
+                        pat = torch.as_tensor(pa, dtype=torch.float32, device=self.config.device)
+                        with torch.no_grad():
+                            out = self._train_model.forward_step(ot, hidden=hid, prev_action=pat)
+                            at = out["tactical_dist"].sample()
+                            lpt = out["tactical_dist"].log_prob(at)
+                            vt = out["value"]
+                        anp = at.cpu().numpy().astype(np.float32)
+                        aint = anp.astype(np.int8)
+                        hin = hid.squeeze(0).cpu().numpy()
+                        rews = np.zeros(n_envs, dtype=np.float32)
+                        dones = np.zeros(n_envs, dtype=np.float32)
+                        next_ol = []
+                        nhid = out["next_hidden"]
+                        npa = anp.copy()
+                        ms_np = out["mem_summary"].cpu().numpy()
+                        for i_e, e in enumerate(envs):
+                            no, _, term, trunc, _ = e.step(aint[i_e])
+                            priv = e.privileged_state()
+                            raw_r, _ = shapers[i_e].step(priv, action=aint[i_e], obs=no, mem_summary=ms_np[i_e])
+                            rews[i_e] = apply_modifiers_to_shaper(shapers[i_e], raw_r, aint[i_e], no, self._feedback_modifiers)
+                            dn = bool(term or trunc)
+                            dones[i_e] = float(dn)
+                            if dn:
+                                no, _ = e.reset(seed=900 + rep_id * 10 + i_e)
+                                shapers[i_e].reset(e.privileged_state(), obs=no)
+                                nhid[:, i_e, :] = 0.0
+                                npa[i_e] = 0.0
+                            next_ol.append(no)
+                        obuf.add(obs_l, pa, anp, lpt.cpu().numpy(), vt.cpu().numpy(), rews, dones, hin)
+                        obs_l = next_ol
+                        hid = nhid
+                        pa = npa
+                    with torch.no_grad():
+                        from training.rollout import _batch_obs
+                        lo = self._train_model.forward_step(
+                            _batch_obs(obs_l, self.config.device), hidden=hid,
+                            prev_action=torch.as_tensor(pa, dtype=torch.float32, device=self.config.device),
+                        )
+                    self._trainer.update(obuf, lo["value"].cpu().numpy(), np.zeros(n_envs, dtype=np.float32))
+                    self.update_idx += 1
+                    self.total_steps += r_steps * n_envs
+            finally:
+                for e in envs:
+                    e.close()
+
+            _set_status("Candidate policy ready")
+            _set_status("Evaluating updated policy")
+            after_m = evaluate_policy_episodes(
+                self._train_model, spec["path"], ticks=min(700, spec["episode_ticks"]), n_episodes=2, seed_base=700, device=self.config.device
+            )
+            passed, ver_msg = check_candidate_improvement(categories, before_m, after_m)
+            report["after_metrics"] = after_m
+
+            if passed:
+                self.policy_version_num += 1
+                new_ver = f"v13.{self.policy_version_num}"
+                self.latest_policy_version = new_ver
+                cand_name = f"candidate_{new_ver}.pt"
+                cand_dir = self._exp_dir()
+                cand_dir.mkdir(parents=True, exist_ok=True)
+                self._trainer.save_checkpoint(cand_dir / cand_name, self.update_idx, self.total_steps, extra={"policy_version": new_ver})
+                report["new_version"] = new_ver
+                report["verification"] = ver_msg
+                report["applied"] = True
+                if self.status == "Running":
+                    _set_status("Applying updated policy")
+                    self._pending_promotion = {
+                        "state_dict": copy.deepcopy(self._train_model.state_dict()),
+                        "new_version": new_ver,
+                        "ckpt_name": cand_name,
+                        "report": dict(report),
+                    }
+                else:
+                    self._model.load_state_dict(copy.deepcopy(self._train_model.state_dict()))
+                    self.policy_version = new_ver
+                    self.current_checkpoint = cand_name
+                    _set_status("Improvement verified")
+                self._log("info", f"Online feedback {new_ver} verified: {ver_msg}")
+            else:
+                # Rollback _train_model & optimizer
+                snap = self._prev_stable_snapshot
+                self._train_model.load_state_dict(copy.deepcopy(snap["train_state_dict"]))
+                self._trainer.optimizer.load_state_dict(copy.deepcopy(snap["optimizer_state_dict"]))
+                self._trainer.scheduler.load_state_dict(copy.deepcopy(snap["scheduler_state_dict"]))
+                _set_status("Correction unsuccessful", verification=f"Rolled back to {self.policy_version}: {ver_msg}", applied=False)
+                self._log("warn", f"Candidate rejected & rolled back: {ver_msg}")
+        except Exception as e:
+            _set_status("Correction unsuccessful", verification=f"Error during online update: {e}", applied=False)
+            self._log("error", f"Feedback learning error: {e}")
+        finally:
+            with self._feedback_lock:
+                self._feedback_busy = False
+
+    def rollback_policy(self) -> dict:
+        if self._prev_stable_snapshot is None:
+            return {"ok": False, "error": "No previous stable policy snapshot available to roll back."}
+        snap = self._prev_stable_snapshot
+        with self._lock:
+            self._pending_promotion = None
+            self._model.load_state_dict(copy.deepcopy(snap["model_state_dict"]))
+            self._train_model.load_state_dict(copy.deepcopy(snap["train_state_dict"]))
+            self._trainer.optimizer.load_state_dict(copy.deepcopy(snap["optimizer_state_dict"]))
+            self._trainer.scheduler.load_state_dict(copy.deepcopy(snap["scheduler_state_dict"]))
+            self.policy_version = snap["policy_version"]
+            self.policy_version_num = snap["policy_version_num"]
+            self._feedback_modifiers = copy.deepcopy(snap["modifiers"])
+            self.learning_status = {"status": f"Rolled back to {self.policy_version}", "active_report_id": None}
+            self._log("warn", f"Manually rolled back active policy to {self.policy_version}.")
+        return {"ok": True, "policy_version": self.policy_version}
+
     def snapshot(self) -> dict:
         with self._lock:
             n_eps = len(self.history["ep_rewards"])
@@ -650,6 +1023,12 @@ class TrainingManager:
                 "maps": self.maps,
                 "selected_map": self._map_by_id.get(self.config.map_id),
                 "current_checkpoint": self.current_checkpoint,
+                "policy_version": self.policy_version,
+                "latest_policy_version": self.latest_policy_version,
+                "can_rollback": self._prev_stable_snapshot is not None,
+                "problem_categories": PROBLEM_CATEGORIES,
+                "learning_status": self.learning_status,
+                "problem_history": self.problem_history[:25],
                 "episode_num": self.episode_num,
                 "total_steps": self.total_steps,
                 "total_kills": self.total_kills,

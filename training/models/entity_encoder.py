@@ -107,11 +107,12 @@ class EntityEncoder(nn.Module):
 
         attn_emb = self.out_proj(torch.cat([cls_out, max_pool], dim=-1))  # (B, out_dim)
 
-        # ---- Direct aim pathway: nearest enemy ----
+        # ---- Direct aim pathway: best-aligned & closest visible enemy ----
         et = entity_type.long()
         is_enemy = valid & ((et == 1) | (et == 2) | (et == 3))
-        enemy_dist = torch.where(is_enemy, feat_norm[..., 0], torch.full_like(feat_norm[..., 0], 1e6))
-        best_idx = enemy_dist.argmin(dim=1)  # (B,)
+        prio_score = feat_norm[..., 2] - 0.5 * feat_norm[..., 0]
+        enemy_score = torch.where(is_enemy, prio_score, torch.full_like(prio_score, -1e6))
+        best_idx = enemy_score.argmax(dim=1)  # (B,)
         b_idx = torch.arange(b, device=features.device)
         nearest_feat = feat_norm[b_idx, best_idx, 0:3]  # (B, 3): [dist_norm, sin, cos]
         has_enemy = is_enemy.any(dim=1, keepdim=True).float()  # (B, 1)

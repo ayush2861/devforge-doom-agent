@@ -140,6 +140,60 @@ def _build_center_room_wads(out_dir: Path) -> list[dict]:
     return specs
 
 
+def _build_survival_recovery_wads(out_dir: Path) -> list[dict]:
+    """Controlled survival scenarios: low-health medikits, empty-ammo weapon switch, and combined."""
+    specs = []
+    # 1. Low health + medikit (left, right, ahead)
+    for tag, mx, my in [("med_ahead", 8, 4), ("med_left", 7, 2), ("med_right", 7, 6)]:
+        w, h = 11, 9
+        grid = [["#" for _ in range(w)] for _ in range(h)]
+        for y in range(1, h - 1):
+            for x in range(1, w - 1):
+                grid[y][x] = "."
+        grid[4][2] = "P"
+        grid[my][mx] = "h"
+        wad = compile_udmf_wad("\n".join("".join(r) for r in grid), out_dir / f"surv_{tag}.wad")
+        specs.append({
+            "name": f"surv_{tag}", "wad": str(wad), "ticks": 400, "kill_target": None,
+            "init_cmds": ["take Health 70"],
+        })
+    # 2. Low health + medikit + enemies
+    w, h = 12, 9
+    grid = [["#" for _ in range(w)] for _ in range(h)]
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            grid[y][x] = "."
+    grid[4][2] = "P"; grid[2][6] = "h"; grid[6][8] = "z"; grid[2][9] = "z"
+    wad_me = compile_udmf_wad("\n".join("".join(r) for r in grid), out_dir / "surv_med_enemies.wad")
+    specs.append({
+        "name": "surv_med_enemies", "wad": str(wad_me), "ticks": 600, "kill_target": 2,
+        "init_cmds": ["take Health 70"],
+    })
+    # 3. Empty Pistol + Loaded Shotgun + Enemy (must press SELECT_NEXT_WEAPON!)
+    grid2 = [["#" for _ in range(w)] for _ in range(h)]
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            grid2[y][x] = "."
+    grid2[4][2] = "P"; grid2[4][8] = "z"; grid2[2][7] = "z"
+    wad_sw = compile_udmf_wad("\n".join("".join(r) for r in grid2), out_dir / "surv_empty_switch.wad")
+    specs.append({
+        "name": "surv_empty_switch", "wad": str(wad_sw), "ticks": 500, "kill_target": 2,
+        "init_cmds": ["take Clip 50", "give Shell 12", "give Shotgun"],
+    })
+    # 4. Combined: Low HP + Empty Pistol + Medikit + Loaded Shotgun + Enemies
+    grid3 = [["#" for _ in range(w)] for _ in range(h)]
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            grid3[y][x] = "."
+    grid3[4][2] = "P"; grid3[2][6] = "h"; grid3[6][7] = "z"; grid3[3][9] = "s"; grid3[4][5] = "a"
+    wad_cb = compile_udmf_wad("\n".join("".join(r) for r in grid3), out_dir / "surv_combined.wad")
+    specs.append({
+        "name": "surv_combined", "wad": str(wad_cb), "ticks": 600, "kill_target": 2,
+        "init_cmds": ["take Health 70", "take Clip 50", "give Shell 12", "give Shotgun"],
+    })
+    return specs
+
+
 def _build_corridor_combat_wads(out_dir: Path) -> list[dict]:
     """Stage 3: Long corridors with enemies and exit."""
     specs = []
@@ -170,7 +224,7 @@ def _build_corridor_combat_wads(out_dir: Path) -> list[dict]:
 # ============================================================
 
 def _combat_teacher_action(obs: dict, step_idx: int, mem_summary: np.ndarray | None = None) -> np.ndarray:
-    """Human-style teacher with memory-guided target switching (training-time only)."""
+    """Human-style teacher with health recovery, weapon switching, and memory-guided aiming."""
     a = np.zeros(len(S.BUTTONS), dtype=np.float32)
     ve = obs["visible_entities"]
     mask = ve["mask"].astype(bool)
@@ -180,29 +234,51 @@ def _combat_teacher_action(obs: dict, step_idx: int, mem_summary: np.ndarray | N
     rays = obs["rays"]["distance"]
     hit_types = obs["rays"]["hit_type"]
     front_ray = float(rays[0])
+    hp = float(obs["vitals"][0])
+    cur_wpn = int(round(float(obs["vitals"][2])))
+    cur_ammo = float(obs["vitals"][3])
+    is_empty = (cur_wpn <= 1) or (0.0 <= cur_ammo <= 0.5)
+    other_loaded = mem_summary is not None and float(mem_summary[39]) > 0.5
+
+    # 1. Empty/melee weapon with loaded alternative -> switch weapon!
+    if is_empty and other_loaded and (step_idx % 3 == 0):
+        a[8] = 1.0
+        return a
+
+    # 2. Low health & medikit visible/remembered -> prioritize recovery
+    if hp <= 45.0 and mem_summary is not None and float(mem_summary[36]) > 0.5:
+        med_sin, med_cos = float(mem_summary[34]), float(mem_summary[35])
+        if med_cos >= 0.90:
+            a[0] = 1.0  # move toward medikit
+        elif med_sin > 0.0:
+            a[4] = 1.0
+        else:
+            a[5] = 1.0
+        if enemy_idx and not is_empty:
+            best_i = max(enemy_idx, key=lambda i: float(ve["features"][i, 2]))
+            if float(ve["features"][best_i, 2]) >= 0.982:
+                a[6] = 1.0  # shoot if enemy directly in line while recovering
+        return a
 
     if enemy_idx:
-        # Target the best-aligned / closest visible enemy (dist is normalized [0, 1] by 1024)
-        best_i = max(enemy_idx, key=lambda i: float(ve["features"][i, 2]) - 0.15 * float(ve["features"][i, 0]))
+        # Target the best-aligned / closest visible enemy (consistent with EntityEncoder & Memory)
+        best_i = max(enemy_idx, key=lambda i: float(ve["features"][i, 2]) - 0.5 * float(ve["features"][i, 0]))
         dist = float(ve["features"][best_i, 0])
         sin_a = float(ve["features"][best_i, 1])
         cos_a = float(ve["features"][best_i, 2])
 
-        if cos_a >= 0.982:  # Tight aim (~10.8 deg) so shots actually hit!
+        if cos_a >= 0.982 and not is_empty:  # Tight aim (~10.8 deg) so shots actually hit!
             a[6] = 1.0  # ATTACK
-            if dist > 0.10 and front_ray > 0.12:
-                a[0] = 1.0  # advance while firing
-            # Gentle strafe during close/mid combat
-            if dist < 0.25:
-                a[2 if (step_idx // 8) % 2 == 0 else 3] = 1.0
+            # Only advance if enemy is far (>0.38 = ~390 map units); hold steady in combat range!
+            if dist > 0.38 and front_ray > 0.15:
+                a[0] = 1.0
         else:
-            # Turn toward enemy until centered
+            # Turn smoothly toward enemy without rushing forward
             if sin_a > 0.0:
                 a[4] = 1.0  # TURN_LEFT
             else:
                 a[5] = 1.0  # TURN_RIGHT
-            # Also move forward while turning if path is clear and angle is moderate
-            if front_ray > 0.20 and abs(sin_a) < 0.4:
+            if dist > 0.45 and front_ray > 0.25 and abs(sin_a) < 0.30:
                 a[0] = 1.0
     elif mem_summary is not None and float(mem_summary[5]) > 0.5:
         # No enemy in FOV, but EnemyAwarenessMemory remembers a living threat! Turn toward it.
@@ -211,6 +287,14 @@ def _combat_teacher_action(obs: dict, step_idx: int, mem_summary: np.ndarray | N
             a[4] = 1.0  # TURN_LEFT toward remembered enemy
         else:
             a[5] = 1.0  # TURN_RIGHT toward remembered enemy
+    elif cur_ammo <= 5.0 and mem_summary is not None and float(mem_summary[42]) > 0.5:
+        a_sin = float(mem_summary[41])
+        if abs(a_sin) < 0.35:
+            a[0] = 1.0
+        elif a_sin > 0.0:
+            a[4] = 1.0
+        else:
+            a[5] = 1.0
     else:
         # No enemy visible
         if int(hit_types[0]) == 2 and front_ray < 0.15:
@@ -242,9 +326,19 @@ def bc_warmup(specs: list[dict], save_path: Path, n_steps: int = 12288, seed: in
     act_seqs: list[list[np.ndarray]] = []
     pa_seqs: list[list[np.ndarray]] = []
 
+    def _apply_init_cmds(e, sp_dict):
+        cmds = sp_dict.get("init_cmds")
+        if cmds:
+            for c in cmds:
+                e._game.send_game_command(c)
+            o2, _, _, _, _ = e.step(np.zeros(len(S.BUTTONS), dtype=np.int8))
+            return o2
+        return None
+
     sp = rng.choice(specs)
     env = make_env(sp["wad"], "MAP01", episode_ticks=sp["ticks"], render_buffers=False)
     obs, _ = env.reset(seed=rng.randint(0, 100000))
+    obs = _apply_init_cmds(env, sp) or obs
     prev_a = np.zeros(len(S.BUTTONS), dtype=np.float32)
     em_state = model.enemy_memory.init_state(1, device)
     cur_obs, cur_act, cur_pa = [], [], []
@@ -276,6 +370,7 @@ def bc_warmup(specs: list[dict], save_path: Path, n_steps: int = 12288, seed: in
             sp = rng.choice(specs)
             env = make_env(sp["wad"], "MAP01", episode_ticks=sp["ticks"], render_buffers=False)
             obs, _ = env.reset(seed=rng.randint(0, 100000))
+            obs = _apply_init_cmds(env, sp) or obs
             prev_a = np.zeros(len(S.BUTTONS), dtype=np.float32)
             em_state = model.enemy_memory.init_state(1, device)
             cur_obs, cur_act, cur_pa = [], [], []
@@ -284,8 +379,8 @@ def bc_warmup(specs: list[dict], save_path: Path, n_steps: int = 12288, seed: in
     n_seq = len(obs_seqs)
     print(f"[BC] Collected {n_seq} sequences ({n_seq * seq_len} steps). Training 20 epochs...", flush=True)
 
-    # Class-balanced weights: FWD gets 2x, TURN gets 4x, ATTACK gets 8x, STRAFE gets 2x
-    pos_w = torch.tensor([2.0, 1.0, 2.0, 2.0, 4.0, 4.0, 8.0, 2.0, 1.0], device=device)
+    # Class-balanced weights: FWD gets 2x, TURN gets 4x, ATTACK gets 8x, SELECT_NEXT_WEAPON gets 10x
+    pos_w = torch.tensor([2.0, 1.0, 2.0, 2.0, 4.0, 4.0, 8.0, 2.0, 10.0], device=device)
 
     model.train()
     indices = list(range(n_seq))
@@ -368,6 +463,10 @@ def ppo_stage(
         sp = rng.choice(specs)
         e = make_env(sp["wad"], "MAP01", episode_ticks=sp["ticks"], render_buffers=False)
         o, _ = e.reset(seed=rng.randint(0, 100000))
+        if sp.get("init_cmds"):
+            for c in sp["init_cmds"]:
+                e._game.send_game_command(c)
+            o, _, _, _, _ = e.step(np.zeros(len(S.BUTTONS), dtype=np.int8))
         sh = DoomRewardShaper()
         sh.reset(e.privileged_state(), obs=o)
         return e, sh, o, sp
@@ -539,6 +638,7 @@ def main() -> None:
     print("=== Building training maps ===", flush=True)
     aim_specs = _build_aim_training_wads(maps_dir)
     center_specs = _build_center_room_wads(maps_dir)
+    surv_specs = _build_survival_recovery_wads(maps_dir)
     multi_specs = _build_multi_enemy_wads(maps_dir)
     corridor_specs = _build_corridor_combat_wads(maps_dir)
 
@@ -546,29 +646,35 @@ def main() -> None:
     combat = build_combat_scenarios()
     freedoom2 = str(Path(os.path.dirname(vd.__file__)) / "freedoom2.wad")
 
-    run_dir = Path("training/runs/grandmaster_v9")
+    run_dir = Path("training/runs/grandmaster_v12")
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # ============ STAGE 1: BC Warmup on aim + center-room multi-enemy maps ============
+    # ============ STAGE 1: BC Warmup (include deadly_corridor + center_lr_sym heavily!) ============
     print("\n=== STAGE 1: BC Warmup ===", flush=True)
-    bc_specs = center_specs * 4 + aim_specs * 2 + combat["A_basic"][:4] + combat["C_corridor"][:2]
-    bc_ckpt = bc_warmup(bc_specs, run_dir / "bc_init.pt", n_steps=12288, seed=920)
+    bc_specs = (
+        center_specs * 4
+        + combat["C_corridor"][:1] * 4  # vizdoom_corridor (two ±22 deg enemies!)
+        + surv_specs * 3
+        + aim_specs * 2
+        + combat["A_basic"][:4]
+    )
+    bc_ckpt = bc_warmup(bc_specs, run_dir / "bc_init.pt", n_steps=12288, seed=950)
 
     print("\n--- BC Probe ---", flush=True)
     bc_probe = probe_policy(bc_ckpt)
     print(json.dumps(bc_probe, indent=2), flush=True)
 
-    # ============ STAGE 2: PPO Aim Training (single enemy, kill_terminates) ============
+    # ============ STAGE 2: PPO Aim Training (single enemy + center_lr_sym) ============
     print("\n=== STAGE 2: Aim Training PPO ===", flush=True)
     aim_ckpt = ppo_stage(
         name="S2_Aim",
-        specs=aim_specs * 2 + combat["A_basic"][:4],
-        total_steps=20480,
+        specs=aim_specs * 2 + combat["A_basic"][:4] + center_specs[:2],
+        total_steps=12288,
         save_dir=run_dir / "s2_aim",
         init_ckpt=bc_ckpt,
-        lr=3e-4,
-        ent_coef=0.005,
-        seed=921,
+        lr=2.5e-4,
+        ent_coef=0.0025,
+        seed=951,
         kill_terminates=True,
     )
 
@@ -576,17 +682,17 @@ def main() -> None:
     aim_probe = probe_policy(aim_ckpt)
     print(json.dumps(aim_probe, indent=2), flush=True)
 
-    # ============ STAGE 3: PPO Center-Room & Multi-Enemy Memory Prioritization ============
-    print("\n=== STAGE 3: Multi-Enemy Memory PPO ===", flush=True)
+    # ============ STAGE 3: PPO Multi-Enemy, Deadly Corridor & Survival ============
+    print("\n=== STAGE 3: Multi-Enemy + Survival PPO ===", flush=True)
     multi_ckpt = ppo_stage(
         name="S3_Multi",
-        specs=center_specs * 4 + multi_specs * 2 + combat["B_defend"][:2] + combat["C_corridor"][:2],
-        total_steps=24576,
+        specs=center_specs * 3 + combat["C_corridor"][:1] * 3 + surv_specs * 2 + multi_specs * 2 + combat["B_defend"][:2],
+        total_steps=16384,
         save_dir=run_dir / "s3_multi",
         init_ckpt=aim_ckpt,
-        lr=2e-4,
-        ent_coef=0.004,
-        seed=922,
+        lr=1.5e-4,
+        ent_coef=0.002,
+        seed=952,
         kill_terminates=False,
     )
 
@@ -594,25 +700,26 @@ def main() -> None:
     multi_probe = probe_policy(multi_ckpt)
     print(json.dumps(multi_probe, indent=2), flush=True)
 
-    # ============ STAGE 4: PPO Full Map (corridors + rooms + exits) ============
+    # ============ STAGE 4: PPO Full Map (corridors + rooms + survival + exits) ============
     print("\n=== STAGE 4: Full Map PPO ===", flush=True)
     full_specs = (
-        corridor_specs * 3
+        corridor_specs * 2
         + center_specs * 2
-        + multi_specs[:4]
         + combat["C_corridor"] * 2
+        + surv_specs
+        + multi_specs[:4]
         + [{"name": "freedoom2_map01", "wad": freedoom2, "ticks": 1400, "kill_target": None}] * 2
         + [{"name": "two_rooms", "wad": "maps/two_rooms.wad", "ticks": 1400, "kill_target": None}] * 2
     )
     full_ckpt = ppo_stage(
         name="S4_Full",
         specs=full_specs,
-        total_steps=28672,
+        total_steps=16384,
         save_dir=run_dir / "s4_full",
         init_ckpt=multi_ckpt,
-        lr=1.5e-4,
-        ent_coef=0.003,
-        seed=923,
+        lr=1.2e-4,
+        ent_coef=0.002,
+        seed=953,
         kill_terminates=False,
     )
 

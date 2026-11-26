@@ -222,3 +222,11 @@ _vizdoom.ini
 
 # Local validator / scorer artifacts
 *.lmp
+
+# Generated training artifacts, runs, and procedural WADs
+training/runs/
+training/diagnostics/outputs/
+training/maps/generated/
+training/maps/curriculum/
+training/maps/combat/
+training/maps/movement/

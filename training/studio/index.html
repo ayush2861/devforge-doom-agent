@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>DOOM AI Training Studio</title>
+<style>
+  :root {
+    --bg:#090b0f; --panel:#11141b; --panel2:#161a23; --border:#232936;
+    --text:#e6eaf2; --muted:#8b95a7; --accent:#38bdf8;
+    --green:#22c55e; --red:#ef4444; --blue:#3b82f6; --amber:#f59e0b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; font-size:13px; }
+  .wrap { max-width:1180px; margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .sec-title { font-size:12px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 10px; }
+  .header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; }
+  .title { font-size:18px; font-weight:800; letter-spacing:.03em; color:#fff; margin:0; }
+  .meta-row { font-size:12px; color:var(--muted); margin-top:4px; font-family:ui-monospace,Menlo,monospace; }
+  .badge { padding:4px 10px; border-radius:999px; font-size:11px; font-weight:700; border:1px solid var(--border); background:var(--panel2); }
+  .badge.Running { color:var(--green); border-color:#166534; background:#052e16; }
+  .badge.Paused { color:var(--amber); border-color:#92400e; background:#2e1a05; }
+  .badge.Failed { color:var(--red); border-color:#991b1b; background:#2e0505; }
+
+  select, input { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:8px 10px; font-size:13px; width:100%; }
+  .map-meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:10px; font-size:12px; }
+  .kv { background:var(--panel2); border:1px solid var(--border); border-radius:7px; padding:8px 10px; }
+  .kv .k { color:var(--muted); font-size:11px; }
+  .kv .v { font-weight:600; margin-top:2px; word-break:break-all; }
+
+  .btn-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; }
+  button { background:var(--panel2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:12px; font-weight:600; cursor:pointer; transition:border-color .15s,background .15s; }
+  button:hover { border-color:var(--accent); background:#1b2130; }
+  button.primary { border-color:#0284c7; background:#082f49; color:#bae6fd; }
+  button.danger { border-color:#991b1b; color:#fecaca; }
+
+  .viewer-wrap { position:relative; background:#000; border:1px solid var(--border); border-radius:8px; overflow:hidden; display:flex; justify-content:center; align-items:center; min-height:360px; }
+  .viewer-wrap img { width:100%; max-width:720px; aspect-ratio:4/3; object-fit:contain; image-rendering:pixelated; display:block; }
+  .viewer-overlay { position:absolute; top:10px; left:10px; background:rgba(9,11,15,.82); border:1px solid var(--border); padding:4px 9px; border-radius:6px; font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+  .viewer-bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+
+  .hud-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .hud-box { background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .hud-val { font-size:24px; font-weight:800; font-family:ui-monospace,Menlo,monospace; }
+  .hud-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; margin-top:2px; }
+  .hp { color:var(--green); } .hp.low { color:var(--red); } .arm { color:var(--blue); } .kil { color:var(--amber); }
+
+  .charts-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:10px; margin-top:10px; }
+  .chart-box { background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:10px; }
+  .chart-box svg { width:100%; height:110px; display:block; }
+
+  .act-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(115px,1fr)); gap:6px; margin-top:8px; }
+  .act-pill { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font-family:ui-monospace,Menlo,monospace; font-size:11px; display:flex; justify-content:space-between; }
+  .act-pill.on { border-color:var(--green); background:#052e16; color:#86efac; }
+
+  .log-box { background:#06080c; border:1px solid var(--border); border-radius:8px; padding:10px; height:170px; overflow-y:auto; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.45; }
+  .log-warn { color:var(--amber); } .log-error { color:var(--red); }
+  details summary { cursor:pointer; font-weight:700; color:var(--accent); }
+  .cfg-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-top:10px; }
+  .err-banner { background:#2e0505; border:1px solid #991b1b; color:#fecaca; padding:8px 12px; border-radius:8px; display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- SECTION 1: Header & Status -->
+  <div class="card">
+    <div class="header">
+      <div>
+        <h1 class="title">DOOM AI TRAINING STUDIO</h1>
+        <div class="meta-row" id="hdr-meta">EXPERIMENT: — · MODEL: — · EPISODE: 0 · STEPS: 0 · ENV: Closed</div>
+      </div>
+      <span class="badge" id="status-badge">Not Started</span>
+    </div>
+    <div id="err-banner" class="err-banner" style="margin-top:10px"></div>
+  </div>
+
+  <!-- SECTION 2 & 3: Map Selection & Details -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div class="sec-title" style="margin:0">01 — Select Training Map</div>
+      <span id="map-lock-hint" style="font-size:11px;color:var(--amber);display:none;">Pause or Stop training to switch maps</span>
+    </div>
+    <select id="map-select" onchange="onSelectMap(this.value)"></select>
+    <div class="map-meta" id="map-details"></div>
+  </div>
+
+  <!-- SECTION 4: Training Controls -->
+  <div class="card">
+    <div class="sec-title">02 — Training Controls</div>
+    <div class="btn-grid">
+      <button class="primary" onclick="ctrl('start', readCfg())">Start Training</button>
+      <button onclick="ctrl('pause')">Pause</button>
+      <button onclick="ctrl('resume')">Resume</button>
+      <button onclick="ctrl('reset_episode')">Reset Episode</button>
+      <button onclick="ctrl('stop')">Stop Training</button>
+      <button onclick="ctrl('save_checkpoint', {tag:'manual'})">Save Checkpoint</button>
+      <button class="danger" onclick="onRestart()">Restart Fresh</button>
+    </div>
+  </div>
+
+  <!-- SECTION 5: Live Gameplay Viewer -->
+  <div class="card">
+    <div class="viewer-bar">
+      <div class="sec-title" style="margin:0">03 — Live DOOM Gameplay</div>
+      <div style="display:flex;align-items:center;gap:10px;font-size:12px;">
+        <span style="color:var(--muted)">Policy:</span>
+        <select id="mode-select" style="width:auto;padding:4px 8px;" onchange="ctrl('set_mode', {deterministic_eval: this.value === '1'})">
+          <option value="0" selected>Train (Stochastic)</option>
+          <option value="1">Eval (Smooth Deterministic)</option>
+        </select>
+        <span style="color:var(--muted)">Sim Speed:</span>
+        <select id="speed-select" style="width:auto;padding:4px 8px;" onchange="ctrl('set_speed', {step_delay_ms: Number(this.value)})">
+          <option value="115">1x Real-Time</option>
+          <option value="80" selected>1.4x Smooth</option>
+          <option value="25">4x Fast</option>
+          <option value="0">Max Speed</option>
+        </select>
+        <span style="color:var(--muted)">Viewer FPS:</span>
+        <select id="fps-select" style="width:auto;padding:4px 8px;" onchange="changeFps(this.value)">
+          <option value="5">5 FPS</option>
+          <option value="10">10 FPS</option>
+          <option value="15" selected>15 FPS</option>
+          <option value="30">30 FPS</option>
+        </select>
+      </div>
+    </div>
+    <div class="viewer-wrap">
+      <img id="live-stream" src="/stream.mjpg?fps=15" alt=""/>
+      <div class="viewer-overlay" id="viewer-overlay">Status: Not Started</div>
+      <div id="viewer-msg" style="position:absolute;color:var(--muted);font-size:13px;text-align:center;pointer-events:none;background:rgba(9,11,15,.85);padding:10px 16px;border-radius:8px;border:1px solid var(--border);">
+        Select a map above and click <strong style="color:#bae6fd">Start Training</strong> to launch live ViZDoom gameplay.
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 6: Player HUD -->
+  <div class="card">
+    <div class="sec-title">04 — Player HUD</div>
+    <div class="hud-grid">
+      <div class="hud-box"><div class="hud-val hp" id="hud-hp">100%</div><div class="hud-lbl">Health</div></div>
+      <div class="hud-box"><div class="hud-val arm" id="hud-arm">0%</div><div class="hud-lbl">Armor</div></div>
+      <div class="hud-box"><div class="hud-val kil" id="hud-kills">0 / 0</div><div class="hud-lbl">Kills (Ep / Total)</div></div>
+      <div class="hud-box"><div class="hud-val" id="hud-ep">0</div><div class="hud-lbl">Episode</div></div>
+    </div>
+  </div>
+
+  <!-- SECTION 7: Ammunition -->
+  <div class="card">
+    <div class="sec-title">05 — Ammunition</div>
+    <div class="hud-grid">
+      <div class="hud-box"><div class="hud-val" id="ammo-bul">50</div><div class="hud-lbl">Bullets</div></div>
+      <div class="hud-box"><div class="hud-val" id="ammo-shl">0</div><div class="hud-lbl">Shells</div></div>
+      <div class="hud-box"><div class="hud-val" id="ammo-rkt">0</div><div class="hud-lbl">Rockets</div></div>
+      <div class="hud-box"><div class="hud-val" id="ammo-cel">0</div><div class="hud-lbl">Cells</div></div>
+    </div>
+  </div>
+
+  <!-- SECTION 8: Weapon & Survival -->
+  <div class="card">
+    <div class="sec-title">06 — Weapon &amp; Survival Telemetry</div>
+    <div class="map-meta" id="surv-grid"></div>
+  </div>
+
+  <!-- SECTION 9: Training Performance & Charts -->
+  <div class="card">
+    <div class="sec-title">07 — Training Performance &amp; Live Charts</div>
+    <div class="map-meta" id="perf-stats"></div>
+    <div class="charts-grid">
+      <div class="chart-box"><div class="k">Episode Reward (blue) &amp; Moving Avg (green)</div><svg id="ch-rew"></svg></div>
+      <div class="chart-box"><div class="k">Kills per Episode</div><svg id="ch-kil"></svg></div>
+      <div class="chart-box"><div class="k">Survival Duration (steps)</div><svg id="ch-sur"></svg></div>
+      <div class="chart-box"><div class="k">PPO Policy Loss (blue) &amp; Value Loss (amber)</div><svg id="ch-los"></svg></div>
+      <div class="chart-box"><div class="k">Exploration Coverage (cells visited)</div><svg id="ch-exp"></svg></div>
+      <div class="chart-box"><div class="k">Action Probs: Forward (green), Turn (amber), Attack (red)</div><svg id="ch-act"></svg></div>
+    </div>
+  </div>
+
+  <!-- SECTION 10: AI Behavior Analysis -->
+  <div class="card">
+    <div class="sec-title">08 — AI Behavior Analysis (Neural Policy Outputs)</div>
+    <div class="map-meta" id="behav-stats"></div>
+    <div class="act-grid" id="act-grid"></div>
+  </div>
+
+  <!-- SECTION 10B: Surroundings & Enemy Memory Radar -->
+  <div class="card">
+    <div class="sec-title">08B — Surroundings &amp; Enemy Awareness Memory</div>
+    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+      <canvas id="mem-radar" width="220" height="220" style="background:#0b1120;border:1px solid #1e293b;border-radius:8px"></canvas>
+      <div id="mem-legend" style="font-size:12px;line-height:1.7;color:#cbd5e1">
+        <div><span style="color:#ef4444">●</span> Living Enemy (visible)</div>
+        <div><span style="color:#f97316">◎</span> Remembered Living (off-screen)</div>
+        <div><span style="color:#22c55e">✕</span> Confirmed Killed Enemy</div>
+        <div><span style="color:#facc15">◯</span> Selected Priority Target</div>
+        <div><span style="color:#16a34a">■</span> Cleared Sector / <span style="color:#1e293b">■</span> Unexplored</div>
+        <div id="mem-counts" style="margin-top:6px;font-weight:600;color:#38bdf8">Alive: 0 · Killed: 0</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 11: Configuration, Model & Experiment Management -->
+  <div class="card">
+    <details>
+      <summary>09 — Training Configuration</summary>
+      <div class="cfg-grid" id="cfg-grid">
+        <div><label class="k">Experiment Name</label><input id="cfg-experiment_name" value="combat_studio_exp"/></div>
+        <div><label class="k">Episodes</label><input id="cfg-num_episodes" type="number" value="200"/></div>
+        <div><label class="k">Max Ticks</label><input id="cfg-max_ticks" type="number" value="1400"/></div>
+        <div><label class="k">Learning Rate</label><input id="cfg-lr" type="number" step="0.0001" value="0.0003"/></div>
+        <div><label class="k">Batch Sequences</label><input id="cfg-batch_seqs" type="number" value="8"/></div>
+        <div><label class="k">PPO Epochs</label><input id="cfg-ppo_epochs" type="number" value="4"/></div>
+        <div><label class="k">Gamma</label><input id="cfg-gamma" type="number" step="0.01" value="0.99"/></div>
+        <div><label class="k">GAE Lambda</label><input id="cfg-gae_lambda" type="number" step="0.01" value="0.95"/></div>
+        <div><label class="k">Entropy Coef</label><input id="cfg-ent_coef" type="number" step="0.001" value="0.01"/></div>
+        <div><label class="k">Checkpoint Interval</label><input id="cfg-checkpoint_interval" type="number" value="10"/></div>
+        <div><label class="k">Seed</label><input id="cfg-seed" type="number" value="42"/></div>
+        <div><label class="k">Device</label><select id="cfg-device"><option value="cpu">cpu</option><option value="mps">mps</option><option value="cuda">cuda</option></select></div>
+      </div>
+    </details>
+    <div style="margin-top:14px;">
+      <div class="sec-title">10 — Model, Checkpoint &amp; Experiment Management</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <select id="ckpt-select" style="flex:1;min-width:260px;"></select>
+        <button onclick="loadSelectedCkpt(true)">Resume Checkpoint</button>
+        <button onclick="loadSelectedCkpt(false)">Load Weights Only</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 12: Logs -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div class="sec-title" style="margin:0">11 — Live Training Logs</div>
+      <button style="padding:4px 10px;" onclick="ctrl('clear_logs')">Clear Visible Log</button>
+    </div>
+    <div class="log-box" id="log-box"></div>
+  </div>
+
+</div>
+<script>
+const BUTTONS = ["MOVE_FORWARD","MOVE_BACKWARD","MOVE_LEFT","MOVE_RIGHT","TURN_LEFT","TURN_RIGHT","ATTACK","USE","SELECT_NEXT_WEAPON"];
+let mapsInit = false;
+
+async function ctrl(action, payload={}) {
+  const r = await fetch('/api/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, ...payload})});
+  const d = await r.json();
+  const eb = document.getElementById('err-banner');
+  if (!d.ok && d.error) { eb.style.display='block'; eb.textContent = d.error; }
+  else { eb.style.display='none'; }
+  poll();
+}
+
+function readCfg() {
+  const fields = ["experiment_name","num_episodes","max_ticks","lr","batch_seqs","ppo_epochs","gamma","gae_lambda","ent_coef","checkpoint_interval","seed","device"];
+  const out = {};
+  for (const f of fields) out[f] = document.getElementById('cfg-' + f).value;
+  return out;
+}
+
+function onSelectMap(mapId) { ctrl('select_map', {map_id: mapId}); }
+function onRestart() {
+  const name = prompt("Enter new experiment name (or keep current):", document.getElementById('cfg-experiment_name').value + "_new");
+  if (name !== null) { document.getElementById('cfg-experiment_name').value = name; ctrl('restart', {experiment_name: name}); }
+}
+function loadSelectedCkpt(resumeOpt) {
+  const path = document.getElementById('ckpt-select').value;
+  if (path) ctrl('load_checkpoint', {path, resume_optimizer: resumeOpt});
+}
+function changeFps(fps) { document.getElementById('live-stream').src = '/stream.mjpg?fps=' + fps + '&t=' + Date.now(); }
+
+function drawSvg(svgId, seriesList) {
+  const svg = document.getElementById(svgId);
+  const w = 320, h = 110, pad = 8;
+  const all = seriesList.flatMap(s => s.data);
+  if (all.length < 2) { svg.innerHTML = `<text x="12" y="58" fill="#64748b" font-size="11">Waiting for completed episodes...</text>`; return; }
+  let mn = Math.min(...all), mx = Math.max(...all);
+  if (mn === mx) { mn -= 1; mx += 1; }
+  let html = '';
+  for (const s of seriesList) {
+    if (s.data.length < 2) continue;
+    const pts = s.data.map((v, i) => {
+      const x = pad + (i / (s.data.length - 1)) * (w - 2 * pad);
+      const y = h - pad - ((v - mn) / (mx - mn)) * (h - 2 * pad);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    html += `<polyline fill="none" stroke="${s.color}" stroke-width="1.8" points="${pts}"/>`;
+  }
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.innerHTML = html;
+}
+
+function kv(k, v) { return `<div class="kv"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+
+async function poll() {
+  try {
+    const r = await fetch('/api/state');
+    const s = await r.json();
+
+    document.getElementById('hdr-meta').textContent =
+      `EXPERIMENT: ${s.config.experiment_name} · MODEL: ${s.current_checkpoint} · EPISODE: ${s.episode_num} · STEPS: ${s.total_steps} · ENV: ${s.env_status}`;
+    const sb = document.getElementById('status-badge');
+    sb.textContent = s.status;
+    sb.className = 'badge ' + s.status;
+
+    const sel = document.getElementById('map-select');
+    if (!mapsInit && s.maps.length) {
+      mapsInit = true;
+      sel.innerHTML = s.maps.map(m => `<option value="${m.id}">[${m.category}] ${m.name} (${m.filename}) — ${m.difficulty}</option>`).join('');
+    }
+    sel.value = s.config.map_id;
+    sel.disabled = (s.status === 'Running' || s.status === 'Initializing');
+    document.getElementById('map-lock-hint').style.display = sel.disabled ? 'inline' : 'none';
+    if (s.selected_map) {
+      const m = s.selected_map;
+      document.getElementById('map-details').innerHTML =
+        kv('Map Name', m.name) + kv('WAD File', m.filename) + kv('Category / Difficulty', `${m.category} (${m.difficulty})`) +
+        kv('Availability', m.available ? 'Available' : 'Missing') + kv('Path', m.path) + kv('Description', m.description);
+      document.getElementById('viewer-overlay').textContent = `${m.name} · Ep ${s.episode_num} · ${s.status}`;
+    }
+    const vm = document.getElementById('viewer-msg');
+    if (s.status === 'Running') { vm.style.display = 'none'; }
+    else {
+      vm.style.display = 'block';
+      vm.innerHTML = s.status === 'Paused' ? 'Training Paused — click <strong>Resume</strong> to continue.'
+        : s.status === 'Initializing' ? 'Initializing ViZDoom &amp; ESRHA model...'
+        : 'Select a map above and click <strong style="color:#bae6fd">Start Training</strong> to launch live ViZDoom gameplay.';
+    }
+
+    const hpEl = document.getElementById('hud-hp');
+    hpEl.textContent = Math.round(s.hud.health) + '%';
+    hpEl.className = 'hud-val hp' + (s.hud.health <= 30 ? ' low' : '');
+    document.getElementById('hud-arm').textContent = Math.round(s.hud.armor) + '%';
+    document.getElementById('hud-kills').textContent = `${s.hud.kills} / ${s.total_kills}`;
+    document.getElementById('hud-ep').textContent = s.hud.episode;
+
+    document.getElementById('ammo-bul').textContent = Math.round(s.hud.ammo_bullets);
+    document.getElementById('ammo-shl').textContent = Math.round(s.hud.ammo_shells);
+    document.getElementById('ammo-rkt').textContent = Math.round(s.hud.ammo_rockets);
+    document.getElementById('ammo-cel').textContent = Math.round(s.hud.ammo_cells);
+
+    document.getElementById('surv-grid').innerHTML =
+      kv('Selected Weapon', `Slot ${s.hud.selected_weapon} (Ammo: ${Math.round(s.hud.selected_weapon_ammo)})`) +
+      kv('Survival Tics', `${s.hud.survival_tics} / ${s.hud.episode_ticks}`) +
+      kv('Damage Taken', s.hud.damage_taken.toFixed(1)) +
+      kv('Exploration Cells', s.hud.cells_visited);
+
+    document.getElementById('perf-stats').innerHTML =
+      kv('Current Ep Reward', s.hud.ep_reward) + kv('Avg Reward (10)', s.avg_reward) +
+      kv('Best Ep Reward', s.best_reward) + kv('Completed Episodes', s.completed_episodes) +
+      kv('Total Steps', s.total_steps) + kv('Total Kills', s.total_kills) +
+      kv('Avg Kills / Ep', s.avg_kills) + kv('Avg Survival', s.avg_survival);
+
+    drawSvg('ch-rew', [{data: s.history.ep_rewards, color:'#38bdf8'}, {data: s.history.avg_rewards, color:'#22c55e'}]);
+    drawSvg('ch-kil', [{data: s.history.ep_kills, color:'#f59e0b'}]);
+    drawSvg('ch-sur', [{data: s.history.ep_survival, color:'#a78bfa'}]);
+    drawSvg('ch-los', [{data: s.history.policy_losses, color:'#38bdf8'}, {data: s.history.value_losses, color:'#f59e0b'}]);
+    drawSvg('ch-exp', [{data: s.history.ep_cells, color:'#22c55e'}]);
+    drawSvg('ch-act', [{data: s.history.fwd_probs||[], color:'#22c55e'}, {data: s.history.turn_probs||[], color:'#f59e0b'}, {data: s.history.atk_probs||[], color:'#ef4444'}]);
+
+    const b = s.behavior;
+    document.getElementById('behav-stats').innerHTML =
+      kv('Enemy Detected', b.enemy_detected ? `YES (${b.visible_enemies} visible)` : 'NO') +
+      kv('Strategic Mode', b.strategy) +
+      kv('Distance Travelled', (b.distance_travelled || 0) + ' u') +
+      kv('Aimed / Wasted Shots', `${b.aimed_shots} / ${b.wasted_shots}`) +
+      kv('Attack % / Explore %', `${b.attack_pct}% / ${b.explore_pct}%`) +
+      kv('Move / Turn / Strafe', `${b.move_count} / ${b.turn_count} / ${b.strafe_count}`);
+
+    document.getElementById('act-grid').innerHTML = BUTTONS.map((name, i) =>
+      `<div class="act-pill ${b.action[i]?'on':''}"><span>${name}</span><span>${b.action[i]} (${b.action_probs[i].toFixed(2)})</span></div>`
+    ).join('');
+
+    if (s.memory_viz) drawMemoryRadar(s.memory_viz);
+
+    const cSel = document.getElementById('ckpt-select');
+    const prevVal = cSel.value;
+    cSel.innerHTML = s.checkpoints.map(c => `<option value="${c.path}">[${c.kind}] ${c.name} (${c.size_mb} MB · ${c.mtime})</option>`).join('');
+    if (prevVal) cSel.value = prevVal;
+
+    document.getElementById('log-box').innerHTML = s.logs.map(l =>
+      `<div class="log-${l.level}">[${l.time}] ${l.msg}</div>`
+    ).join('');
+  } catch (e) {}
+}
+function drawMemoryRadar(mv) {
+  const c = document.getElementById('mem-radar');
+  if (!c) return;
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height, cx = W / 2, cy = H / 2, R = 95;
+  ctx.clearRect(0, 0, W, H);
+  // Sector arcs (ego angle 0 = UP (-pi/2), +angle = LEFT (CCW in world -> -angle on canvas))
+  if (mv.sectors) {
+    for (const sec of mv.sectors) {
+      const a0 = -Math.PI / 2 - (sec.angle_deg + 22.5) * Math.PI / 180;
+      const a1 = -Math.PI / 2 - (sec.angle_deg - 22.5) * Math.PI / 180;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath();
+      if (sec.living > 0.2) ctx.fillStyle = `rgba(239,68,68,${0.18 * sec.living})`;
+      else if (sec.cleared > 0.2) ctx.fillStyle = `rgba(34,197,94,${0.18 * sec.cleared})`;
+      else ctx.fillStyle = 'rgba(30,41,59,0.25)';
+      ctx.fill();
+    }
+  }
+  // Range rings & FOV cone
+  ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 1;
+  [0.33, 0.66, 1.0].forEach(f => { ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2); ctx.stroke(); });
+  ctx.strokeStyle = 'rgba(56,189,248,0.25)';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx - R * Math.sin(Math.PI/4), cy - R * Math.cos(Math.PI/4));
+  ctx.moveTo(cx, cy); ctx.lineTo(cx + R * Math.sin(Math.PI/4), cy - R * Math.cos(Math.PI/4)); ctx.stroke();
+  // Slots (ego_x = forward -> -canvas_y, ego_y = left -> -canvas_x)
+  for (const sl of (mv.slots || [])) {
+    const px = cx - sl.y * R;
+    const py = cy - sl.x * R;
+    if (sl.status === 'killed') {
+      ctx.strokeStyle = '#22c55e'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(px-4, py-4); ctx.lineTo(px+4, py+4); ctx.moveTo(px+4, py-4); ctx.lineTo(px-4, py+4); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2);
+      if (sl.visible) { ctx.fillStyle = '#ef4444'; ctx.fill(); }
+      else { ctx.strokeStyle = '#f97316'; ctx.lineWidth = 2; ctx.stroke(); }
+    }
+  }
+  if (mv.target) {
+    const tx = cx - mv.target.y * R, ty = cy - mv.target.x * R;
+    ctx.strokeStyle = '#facc15'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(tx, ty, 9, 0, Math.PI * 2); ctx.stroke();
+  }
+  // Player triangle
+  ctx.fillStyle = '#38bdf8';
+  ctx.beginPath(); ctx.moveTo(cx, cy - 7); ctx.lineTo(cx - 5, cy + 5); ctx.lineTo(cx + 5, cy + 5); ctx.closePath(); ctx.fill();
+  const cnt = document.getElementById('mem-counts');
+  if (cnt) cnt.textContent = `Alive: ${mv.alive_count || 0} · Killed: ${mv.killed_count || 0}`;
+}
+
+setInterval(poll, 500);
+poll();
+</script>
+</body>
+</html>

@@ -1,88 +1,50 @@
-# devforge-doom-template
+# DevForge DOOM AI Agent — ESRHA
 
-Starter template for **Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"**
+Submission for **Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"**
 
-> For decades, *"Can it run DOOM?"* was the ultimate hardware test. Now: **can your neural network
-> actually play DOOM?** Train an agent that plays unseen levels **zero-shot**: survive ambushes,
-> navigate multi-room layouts, find keycards, unlock doors and reach the exit.
+**ESRHA (Ego-Spatial Recurrent Hierarchical Agent)** is a lightweight (`1.46M`–`1.60M` parameters, `5.75 MB` weights) PyTorch reinforcement learning agent trained from scratch with Recurrent PPO, Intrinsic Curiosity (ICM), Differentiable Episodic Slot Memory, and a 6-stage Performance-Based Curriculum.
 
-No dataset is provided. Your agent learns by interacting with the engine.
+See [PROJECT_BRIEF.pdf](PROJECT_BRIEF.pdf) for the two-page technical brief.
 
-## Quickstart
+---
 
-1. Click **"Use this template"** on GitHub to create your team's (public) repository.
-2. Set up the environment (Python 3.13, [uv](https://docs.astral.sh/uv/)):
+## Architecture Overview (`training/models/`)
 
-   ```bash
-   uv sync                 # installs vizdoom, gymnasium and the official wrapper (env/) in editable mode
-   uv run python validate.py
-   ```
+1. **Spatial Encoder (`spatial_encoder.py`)**: Circular 1D CNN (`padding_mode="circular"`) over 64 ego-centric 360° rays (`distance`, `1 - distance`, `hit_type` embedding), strided 2D CNN over `(120, 160)` depth, and normalized 17-d vitals (one-hot weapon, log-scaled ammo, keys, ego velocity) + `prev_action`.
+2. **Entity Attention Encoder (`entity_encoder.py`)**: Per-entity MLP + `Embedding(12, 8)` + prepended `[CLS]` token + 4-head masked self-attention (`key_padding_mask` ignoring padded slots, zero-NaN safe for 0 visible entities) + masked max pool.
+3. **Modular Visual Encoder (`visual_encoder.py`)**: Optional strided RGB CNN (`enabled=True/False`).
+4. **Recurrent Spatial-Episodic Memory (`memory.py`)**: `GRU(384, 384)` augmented with an 8-slot × 32-dim differentiable gated episodic memory bank (`state_dim = 640`).
+5. **Hierarchical Policy & Critic (`policy.py`)**: 5-mode Strategic Head (`exploration`, `combat`, `item_collection`, `door_progression`, `exit_seeking`) conditioning a Tactical `MultiBinary(9)` head (`Independent(Bernoulli, 1)`) and scalar Value Network.
 
-   Or use the official image, which is exactly what the scorer runs:
+---
 
-   ```bash
-   docker build -t devforge-doom .            # or: docker pull <official image tag, announced>
-   python validate.py --docker --image devforge-doom   # installs requirements.txt, then runs sandboxed like the scorer
-   ```
+## Setup & Validation
 
-3. Replace the random baseline in `submission/agent.py` with your trained agent.
-4. Put weights in `submission/weights/` (Git LFS) and training code in `training/`.
-5. Run `python validate.py --docker` and submit your repo URL.
-
-**Platforms:** Linux (x86-64/ARM), macOS on Apple Silicon (macOS 15+) and Windows (x86-64) all
-work with `uv sync` and `validate.py`. Intel Macs have no `vizdoom` 1.3.3 wheel: use Docker or a
-Linux machine. Evaluation runs on Linux, so `validate.py --docker` is the closest check.
-
-## Repository layout
-
-```
-env/                  official ViZDoom Gymnasium wrapper (doom_env): spaces, sensors, protocol, limits
-maps/                 one small test map (NOT an evaluation map); bring your own for training
-submission/agent.py   your DoomAgent: the evaluation entry point
-submission/weights/   model weights (Git LFS)
-training/             your training pipeline
-validate.py           run before submitting
-tests/                tests for the wrapper and validator (uv run pytest)
-docs/                 contract, rules, submission guide, evaluation details
+```bash
+uv sync
+uv run python validate.py
+# Or in Docker (Linux GPU):
+python validate.py --docker
 ```
 
-## Using the environment
+## Training & Evaluation
 
-```python
-from doom_env import make_env
+```bash
+# 1. Generate procedural long-horizon progression WADs
+PYTHONPATH=. uv run python training/maps/progression_wads.py
 
-env = make_env("maps/two_rooms.wad")     # test map; use your own maps for training
-obs, info = env.reset(seed=0)
-obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+# 2. Train with custom Recurrent PPO + ICM (optional --web live dashboard on :8765)
+PYTHONPATH=. uv run python training/train.py \
+  --wad maps/two_rooms.wad --total-steps 204800 --use-icm --web
+
+# 3. Train with 6-stage performance-based curriculum
+PYTHONPATH=. uv run python training/train_curriculum.py --total-steps 500000
+
+# 4. Evaluate zero-shot generalization on unseen test maps
+PYTHONPATH=. uv run python training/eval_generalization.py \
+  --checkpoint training/runs/curriculum_v1/best.pt --split test
 ```
 
-Observations are a dict of `rgb`, `depth`, `vitals`, `rays` and `visible_entities`, all
-ego-centric and partially observable. See [docs/CONTRACT.md](docs/CONTRACT.md).
-The wrapper's `reward` is a basic default for convenience. Shape your own reward for training.
+## Inference (`submission/agent.py`)
 
-**Compute tip:** training only on raw pixels is expensive. The `rays`, `visible_entities` and
-`vitals` signals run thousands of steps per second on a CPU. Hybrid pixel + spatial models are welcome.
-
-## Hardware at evaluation
-
-One NVIDIA **RTX 3090 (24 GB)** shared between evaluation workers. Each agent gets **2 GB VRAM,
-8 GB RAM and 1 CPU thread**, so keep models compact and inference fast
-(see [hardware](docs/EVALUATION.md#hardware) and [timeouts](docs/EVALUATION.md#timeouts)).
-`validate.py` runs your agent under the same CPU/RAM limits and reports GPU memory.
-
-## Documentation
-
-| Doc | What's inside |
-| --- | --- |
-| [docs/CONTRACT.md](docs/CONTRACT.md) | Observation/action spaces and the `DoomAgent` interface |
-| [docs/RULES.md](docs/RULES.md) | Ground rules: what's allowed, what gets you disqualified |
-| [docs/SUBMISSION.md](docs/SUBMISSION.md) | Submission checklist, Git LFS, 1 GB limit, `requirements.txt` |
-| [docs/EVALUATION.md](docs/EVALUATION.md) | Map tiers, scoring categories, timeouts, replays |
-
-## Rules in one minute
-
-- Actions must come from **trained neural parameters**: no rule trees, no `A*`/Dijkstra, no `atan2` aimbots,
-  no unmodified off-the-shelf SB3.
-- Change anything you want **during training**. Evaluation uses the **vanilla engine**, the
-  official wrapper and **unseen maps**.
-- Create the repo during the hackathon. Libraries are fine; the core architecture and training must be yours.
+`DoomAgent` loads `submission/weights/esrha_best.pt` (`5.75 MB`) once in `__init__`, resets GRU + episodic slot memory in `reset()`, and returns `np.int8` `(9,)` binary actions in `act()` at ~`4–6 ms/step` on 1 CPU thread.

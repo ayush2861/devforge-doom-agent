@@ -1,0 +1,112 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 3999 >>
+stream
+0.070 0.150 0.280 rg 0.0 722.0 612.0 70.0 re f
+BT /F2 14.5 Tf 1.000 1.000 1.000 rg 44.0 760.0 Td (ESRHA: Ego-Spatial Recurrent Hierarchical Agent for Zero-Shot DOOM) Tj ET
+BT /F1 9.5 Tf 0.780 0.860 0.980 rg 44.0 738.0 Td (Yugaantar 2026 - DevForge Track 1: Can It Play DOOM?  |  Technical Project Brief \(Page 1 of 2\)) Tj ET
+BT /F2 11.5 Tf 0.080 0.240 0.480 rg 44.0 696.0 Td (1. Project Title, USP & Problem Statement) Tj ET
+1.00 w 0.150 0.420 0.750 RG 44.0 692.0 m 568.0 692.0 l S
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 678.0 Td (USP: ESRHA fuses 360-degree circular ray convolutions, zero-NaN masked entity self-attention, and a) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 665.0 Td (GRU + Differentiable Episodic Slot Memory into a compact 1.46M-param \(5.75 MB\) policy running at) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 652.0 Td (4-6 ms/step on 1 CPU thread, trained from scratch with Recurrent PPO, ICM curiosity, and a 6-stage curriculum.) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 639.0 Td (Problem: Agents must generalize zero-shot to unseen DOOM maps under partial observability, MultiBinary\(9\)) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 626.0 Td (controls \(with edge-triggered USE\), 2 GB VRAM, 1 CPU thread, and a 40 ms/step compute budget.) Tj ET
+BT /F2 11.5 Tf 0.080 0.240 0.480 rg 44.0 603.0 Td (2. ESRHA Neural Architecture \(training/models/\)) Tj ET
+1.00 w 0.150 0.420 0.750 RG 44.0 599.0 m 568.0 599.0 l S
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 585.0 Td (All decisions come purely from trained PyTorch parameters with zero heuristic action trees or global coords.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 568.0 Td (- Spatial Encoder \(233.6K params\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 217.0 568.0 Td (Circular 1D CNN \(padding_mode='circular'\) on 64 rays \(dist, 1-dist,) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 556.5 Td (6-class embedding\) + strided 2D CNN on \(120, 160\) depth + normalized 17-d vitals \(one-hot weapon,) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 543.5 Td (log-scaled ammo, 6 sticky key flags, ego velocities\) and prev_action \(9-d\) -> 192-d embedding.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 526.5 Td (- Entity Attention \(38.9K params\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 217.0 526.5 Td (Per-entity MLP + Embedding\(12, 8\) over up to 32 visible entities.) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 515.0 Td (Prepends a learned [CLS] token before 4-head MultiheadAttention with key_padding_mask=~mask, ensuring) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 502.0 Td (strict padding invariance and zero-NaN stability when 0 entities are visible -> 128-d embedding.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 485.0 Td (- Visual Encoder \(optional, 138.6K\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 227.3 485.0 Td (Modular strided RGB CNN on \(120, 160, 3\), toggleable via use_visual.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 471.5 Td (- Recurrent Spatial Memory:) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 181.1 471.5 Td (GRU\(384, 384\) + 8-slot x 32-dim Differentiable Episodic Slot Bank) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 460.0 Td (\(state_dim = 640\). Gated attention writes/reads let the agent retain seen doors, keycards, and rooms) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 447.0 Td (across 500-1,050 decision steps, with automatic state reset at episode boundaries during BPTT and reset\(\).) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 430.0 Td (- Hierarchical Policy & Critic:) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 201.6 430.0 Td (5-mode Strategic Head \(exploration, combat, item_collection,) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 418.5 Td (door_progression, exit_seeking\) conditions the Tactical MultiBinary\(9\) Bernoulli head and scalar ValueNet.) Tj ET
+0.75 w 0.800 0.820 0.860 RG 44.0 46.0 m 568.0 46.0 l S
+BT /F1 8.5 Tf 0.450 0.480 0.550 rg 44.0 32.0 Td (DevForge DOOM AI Agent  |  Contract v1.0.0-draft  |  PyTorch 2.15.0) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 4435 >>
+stream
+0.070 0.150 0.280 rg 0.0 722.0 612.0 70.0 re f
+BT /F2 14.5 Tf 1.000 1.000 1.000 rg 44.0 760.0 Td (ESRHA: Training Pipeline, Curriculum & Empirical Results) Tj ET
+BT /F1 9.5 Tf 0.780 0.860 0.980 rg 44.0 738.0 Td (Yugaantar 2026 - DevForge Track 1: Can It Play DOOM?  |  Technical Project Brief \(Page 2 of 2\)) Tj ET
+BT /F2 11.5 Tf 0.080 0.240 0.480 rg 44.0 696.0 Td (3. Custom PPO, Intrinsic Curiosity & Reward Shaping) Tj ET
+1.00 w 0.150 0.420 0.750 RG 44.0 692.0 m 568.0 692.0 l S
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 678.0 Td (- Recurrent PPO \(ppo.py\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 170.9 678.0 Td (Implemented from scratch with truncated BPTT \(seq_len=32\), GAE \(0.99/0.95\),) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 666.5 Td (clipped surrogate \(0.2\), tactical+strategic entropy bonus, grad clip \(0.5\), AdamW + cosine LR, KL stop.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 649.5 Td (- Intrinsic Curiosity \(curiosity.py\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 232.4 649.5 Td (ICM inverse+forward dynamics over encoded observations with Welford) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 638.0 Td (RunningMeanStd normalization \(clipped [0, 0.2]\), masked at episode resets.) Tj ET
+BT /F2 9.5 Tf 0.120 0.140 0.180 rg 44.0 621.0 Td (- Reward Shaping \(reward.py\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 191.4 621.0 Td (Training-only privileged_state\(\) shaping: +0.15/new 64x64 cell, +1.5/kill,) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 58.0 609.5 Td (+2.5/key, +1.0/door sector, +10.0 \(+2.0 time\) exit, -5.0 death, and -0.025 stuck/repeat penalty.) Tj ET
+BT /F2 11.5 Tf 0.080 0.240 0.480 rg 44.0 588.5 Td (4. Curriculum Learning & Controlled Experimental Results) Tj ET
+1.00 w 0.150 0.420 0.750 RG 44.0 584.5 m 568.0 584.5 l S
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 570.5 Td (MapRegistry builds 48 disjoint UDMF WADs \(24 train / 12 val / 12 unseen test\) across 6 stages.) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 557.5 Td (CurriculumScheduler advances stages only when rolling exit, survival, kill, door, and key metrics pass.) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 544.5 Td (A/B Test on prog_02_key_backtrack.wad \(12,288 steps, seed=42\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 531.5 Td (  - No ICM: ep_reward=+3.65, doors_opened=0.725, exit_rate=0.000) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 518.5 Td (  - With ICM \(coef=0.05\): ep_reward=+3.74, doors_opened=0.825, exit_rate=0.025 \(peaked 0.06 at 5.1K steps\)) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 505.5 Td (Unseen Test Split Generalization \(Untrained Baseline vs curriculum_v1/best.pt, 16,384 steps\):) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 492.5 Td (  - Stage 1 \(unseen\): Exit 0.00 -> 0.50 | Cells 11.5 -> 15.5 | Reward -0.07 -> +6.72) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 479.5 Td (  - Stage 5 \(unseen\): Cells 15.5 -> 18.0 | Reward -1.04 -> -0.86 | Stage 6 Surv: 0.50 -> 1.00 \(-2.67 -> -0.32\)) Tj ET
+BT /F2 11.5 Tf 0.080 0.240 0.480 rg 44.0 458.5 Td (5. Official Validator Performance & Achievements / Limitations) Tj ET
+1.00 w 0.150 0.420 0.750 RG 44.0 454.5 m 568.0 454.5 l S
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 440.5 Td (Validator \(validate.py on two_rooms.wad + prog_02_key_backtrack.wad, 525 steps each\): PASSED) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 427.5 Td (  - Model Size: 5.75 MB \(1.46M active params; repo tracked 224.4 KB + LFS weights <= 1 GB\)) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 414.5 Td (  - Init Time: 1.9 s \(limit 60 s\) | two_rooms latency: first 10 ms, p50 4.0 ms, p99 10.6 ms \(2.3s / 21s budget\)) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 401.5 Td (  - prog_02_key_backtrack latency: first 5 ms, p50 6.1 ms, p99 26.5 ms \(3.8s / 21s budget\)) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 388.5 Td (Achievements: End-to-end custom ESRHA + Recurrent PPO + ICM + 6-stage curriculum + live web viewer.) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 375.5 Td (Limitations: Local experiments ran on CPU \(12K-33K steps\); Stage 2-6 exit mastery requires longer GPU) Tj ET
+BT /F1 9.5 Tf 0.120 0.140 0.180 rg 44.0 362.5 Td (training \(500K+ steps\), and --docker / Peak RAM checks must be run on a Linux GPU host.) Tj ET
+0.75 w 0.800 0.820 0.860 RG 44.0 46.0 m 568.0 46.0 l S
+BT /F1 8.5 Tf 0.450 0.480 0.550 rg 44.0 32.0 Td (DevForge DOOM AI Agent  |  submission/agent.py  |  All results directly measured) Tj ET
+endstream
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000402 00000 n 
+0000004453 00000 n 
+0000004589 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+9076
+%%EOF

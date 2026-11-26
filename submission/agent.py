@@ -1,6 +1,6 @@
-"""Evaluation entry point. The scorer instantiates DoomAgent from this file.
+"""Official evaluation entry point for the ESRHA DOOM agent.
 
-Contract: docs/CONTRACT.md §6. This baseline acts randomly. Replace it with your trained agent.
+Contract: docs/CONTRACT.md §6.
 """
 
 from __future__ import annotations
@@ -8,22 +8,45 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
+
+from training.models.doom_model import ESRHAAgentModel
 
 SUBMISSION_DIR = Path(__file__).resolve().parent
-WEIGHTS_DIR = SUBMISSION_DIR / "weights"
+WEIGHTS_PATH = SUBMISSION_DIR / "weights" / "esrha_best.pt"
 
 
 class DoomAgent:
+    """Ego-Spatial Recurrent Hierarchical Agent (ESRHA) for zero-shot DOOM evaluation."""
+
     def __init__(self, observation_space, action_space, device: str):
-        """Called once. Load weights here (e.g. from WEIGHTS_DIR) onto `device` ("cuda" or "cpu")."""
         self.observation_space = observation_space
         self.action_space = action_space
-        self.device = device
-        self.rng = np.random.default_rng(0)
+        self.device = torch.device(device)
+
+        if self.device.type == "cpu":
+            torch.set_num_threads(1)
+
+        ckpt = torch.load(WEIGHTS_PATH, map_location=self.device, weights_only=False)
+        mcfg = ckpt.get("model_config", {})
+        self.model = ESRHAAgentModel(
+            hidden_dim=int(mcfg.get("hidden_dim", 384)),
+            use_visual=bool(mcfg.get("use_visual", False)),
+            use_depth=bool(mcfg.get("use_depth", True)),
+        ).to(self.device)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+        self.reset()
 
     def reset(self) -> None:
-        """Called before every map. Clear recurrent state, memory buffers and trackers here."""
+        """Clear GRU + episodic slot memory and previous-action state between maps."""
+        self.model.reset_state(batch_size=1, device=self.device)
 
+    @torch.inference_mode()
     def act(self, observation: dict) -> np.ndarray:
-        """Return a MultiBinary action: int array of shape action_space.shape with values in {0, 1}."""
-        return self.rng.integers(0, 2, size=self.action_space.shape, dtype=np.int8)
+        """Run ESRHA inference and return an int8 (9,) binary action."""
+        action = self.model.act(observation, deterministic=False)
+        return np.asarray(action, dtype=np.int8).reshape(self.action_space.shape)

@@ -77,6 +77,9 @@ class DoomRewardShaper:
         self._no_enemy_turn_steps = 0
         self._recent_dmg_steps = 0
         self._wpn_switch_cd = 0
+        self._zero_kill_shots = 0
+        self._max_spawn_dist = 0.0
+        self._spawn_xy = (float(priv_state["x"]), float(priv_state["y"]))
         self._prev_enemy_cos = None
         self._prev_ammo = float(obs["vitals"][3]) if obs is not None else None
         self._prev_total_ammo = float(np.sum(obs["vitals"][4:8])) if obs is not None else None
@@ -87,6 +90,7 @@ class DoomRewardShaper:
         cx = int(np.floor(priv_state["x"] / self.cell_size))
         cy = int(np.floor(priv_state["y"] / self.cell_size))
         self._visited.add((cx, cy))
+        self._cur_cell = (cx, cy)
         self._pos_hist.append((priv_state["x"], priv_state["y"]))
         self._stats = EpisodeStats(cells_visited=1)
 
@@ -167,24 +171,27 @@ class DoomRewardShaper:
                 if action is not None and best_cos < 0.985:
                     if best_sin > 0.05:  # enemy to the LEFT
                         if int(action[4]) == 1 and int(action[5]) == 0:
-                            r += 0.22  # Correct: turn left toward enemy
+                            r += 0.22
                         elif int(action[5]) == 1 and int(action[4]) == 0:
-                            r -= 0.18  # Wrong: turning away from enemy
+                            r -= 0.18
                     elif best_sin < -0.05:  # enemy to the RIGHT
                         if int(action[5]) == 1 and int(action[4]) == 0:
-                            r += 0.22  # Correct: turn right toward enemy
+                            r += 0.22
                         elif int(action[4]) == 1 and int(action[5]) == 0:
-                            r -= 0.18  # Wrong: turning away from enemy
+                            r -= 0.18
 
                 # --- CONTEXT-AWARE COMBAT MOVEMENT SPEED ---
                 if action is not None:
                     if best_cos >= 0.94 and best_dist > 0.38:
                         if int(action[0]) == 1 and int(action[1]) == 0:
                             r += 0.06  # approach distant enemy
-                    elif best_dist <= 0.35 and best_cos >= 0.95:
-                        # In effective combat range: slow down & hold aim instead of rushing past!
+                    elif best_dist <= 0.35:
+                        # In effective combat range: brake & turn if enemy is off-center, slow down if close
                         if int(action[0]) == 1:
-                            r -= 0.20 if best_dist < 0.22 else 0.12
+                            if best_cos < 0.94:
+                                r -= 0.12
+                            elif best_cos >= 0.95:
+                                r -= 0.16 if best_dist < 0.22 else 0.08
                         # Allow controlled strafe repositioning only when taking damage
                         if self._recent_dmg_steps > 0 and (int(action[2]) == 1 or int(action[3]) == 1):
                             r += 0.06
@@ -254,23 +261,38 @@ class DoomRewardShaper:
                     r += 0.12
 
             fired = (ammo_spent > 0) or (action is not None and int(action[6]) == 1)
+            if d_kills > 0:
+                self._zero_kill_shots = 0
             if fired:
                 if is_empty and other_ammo_avail:
                     r -= 0.25  # don't fire empty weapon when loaded weapon exists
                     self._stats.wasted_shots += 1
                 elif enemy_visible and best_cos >= 0.982:
-                    # Good shot: enemy tightly centered and visible (~10 deg)
-                    r += 0.35 if best_cos >= 0.994 else 0.18
-                    self._stats.aimed_shots += 1
+                    self._zero_kill_shots += 1
+                    if self._zero_kill_shots >= 5:
+                        # Firing repeatedly with no kill (e.g. wall corner blocking shot): reposition!
+                        r -= 0.25
+                        if action is not None:
+                            if (best_sin > 0.02 and (int(action[2]) == 1 or int(action[4]) == 1)) or (
+                                best_sin < -0.02 and (int(action[3]) == 1 or int(action[5]) == 1)
+                            ):
+                                r += 0.25
+                    else:
+                        # Good shot: enemy tightly centered and visible (~10 deg)
+                        r += 0.35 if best_cos >= 0.994 else 0.18
+                        self._stats.aimed_shots += 1
                 elif d_kills > 0:
                     pass  # already rewarded via kill
                 else:
                     # Bad shot: no enemy visible, or enemy off-center
                     if not enemy_visible:
-                        r -= 0.30  # firing at nothing
+                        front_r = float(obs["rays"]["distance"][0]) if obs is not None else 1.0
+                        r -= 0.45 if front_r < 0.22 else 0.30  # never shoot into a wall / empty space
                     else:
                         r -= 0.25  # enemy visible but not centered
                     self._stats.wasted_shots += 1
+            elif not enemy_visible:
+                self._zero_kill_shots = 0
 
         d_items = priv_state["items"] - self._prev["items"]
         if d_items > 0:
@@ -298,6 +320,11 @@ class DoomRewardShaper:
 
         # 4. Movement and anti-stuck
         px, py = priv_state["x"], priv_state["y"]
+        sx0, sy0 = self._spawn_xy
+        cur_spawn_dist = float(np.hypot(px - sx0, py - sy0))
+        prev_spawn_dist = float(np.hypot(self._prev["x"] - sx0, self._prev["y"] - sy0))
+        d_spawn_dist = cur_spawn_dist - prev_spawn_dist
+        self._max_spawn_dist = max(self._max_spawn_dist, cur_spawn_dist)
         self._pos_hist.append((px, py))
         step_disp = float(np.hypot(px - self._prev["x"], py - self._prev["y"]))
         self._stats.distance_travelled += step_disp
@@ -334,9 +361,10 @@ class DoomRewardShaper:
                         r -= 0.18
             else:
                 turning = (int(action[4]) == 1) or (int(action[5]) == 1)
+                backing_to_spawn = self._max_spawn_dist > 200.0 and d_spawn_dist < -4.0 and d_hp <= 0
 
-                # Look once (<=2 steps), then advance forward when path is clear instead of turning/oscillating
-                if turning and (step_disp < 3.0 or front_ray > 0.22):
+                # Look once (<=2 steps), then advance forward when path is clear — EXCEPT when turning back around from spawn-return or wall!
+                if turning and not backing_to_spawn and front_ray > 0.22:
                     self._no_enemy_turn_steps += 1
                     if self._no_enemy_turn_steps > 2:
                         r -= 0.14  # stop spinning, move forward
@@ -350,17 +378,25 @@ class DoomRewardShaper:
                     ):
                         r -= 0.12
 
-                # Reward forward movement when path is clear and area is cleared
-                if int(action[0]) == 1 and int(action[1]) == 0 and front_ray > 0.14:
+                # Penalize returning back toward spawn after clearing enemies; reward turning around!
+                if backing_to_spawn:
+                    r -= 0.30
+                    if turning:
+                        r += 0.14
+
+                # Reward forward movement when path is clear and NOT returning toward spawn
+                if int(action[0]) == 1 and int(action[1]) == 0 and front_ray > 0.14 and not backing_to_spawn:
                     r += 0.16 * min(step_disp / 10.0, 1.0)
-                elif front_ray <= 0.18 and obs is not None:
-                    # Obstacle ahead: reward turning toward the more open side
+                elif (front_ray <= 0.08 or (front_ray <= 0.12 and step_disp < 1.5)) and obs is not None:
+                    # Wall ahead or sliding nose-on-wall: brake forward push and turn toward the more open side
+                    if int(action[0]) == 1:
+                        r -= 0.16
                     left_clear = float(np.mean(obs["rays"]["distance"][1:9]))
                     right_clear = float(np.mean(obs["rays"]["distance"][-8:]))
-                    if left_clear >= right_clear and int(action[4]) == 1:
-                        r += 0.08
-                    elif right_clear > left_clear and int(action[5]) == 1:
-                        r += 0.08
+                    if left_clear >= right_clear and int(action[4]) == 1 and int(action[5]) == 0:
+                        r += 0.16
+                    elif right_clear > left_clear and int(action[5]) == 1 and int(action[4]) == 0:
+                        r += 0.16
 
                 # Strongly penalize moving backward when no enemy is visible
                 if int(action[1]) == 1:
@@ -368,7 +404,7 @@ class DoomRewardShaper:
 
                 # Wall walking penalty
                 if int(action[0]) == 1 and front_ray < 0.06 and step_disp < 1.0:
-                    r -= 0.04
+                    r -= 0.08
 
         # Anti-stuck detection
         is_stuck = False

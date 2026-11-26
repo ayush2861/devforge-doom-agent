@@ -231,7 +231,11 @@ class EnemyAwarenessMemory(nn.Module):
                         continue
                 else:
                     age_v = float(slots[bi, slot_i, 5].item())
-                    slots[bi, slot_i, 3] *= (0.96 if age_v > 45.0 else 0.994)
+                    if in_center_fov and occluded:
+                        # Wall is closer than remembered enemy: decay rapidly so agent doesn't shoot into a wall
+                        slots[bi, slot_i, 3] *= 0.72
+                    else:
+                        slots[bi, slot_i, 3] *= (0.96 if age_v > 45.0 else 0.994)
                     if slots[bi, slot_i, 3].item() < 0.15:
                         slots[bi, slot_i, 2] = 0.0
 

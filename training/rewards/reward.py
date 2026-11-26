@@ -378,6 +378,15 @@ class DoomRewardShaper:
                     ):
                         r -= 0.12
 
+                # Door interaction: reward pressing USE when facing a door / locked door at close range
+                if obs is not None:
+                    front_hit = int(obs["rays"]["hit_type"][0])
+                    if front_hit in (2, 3) and front_ray <= 0.18:
+                        if int(action[7]) == 1:
+                            r += 0.35
+                        elif front_ray <= 0.10 and int(action[7]) == 0:
+                            r -= 0.10
+
                 # Penalize returning back toward spawn after clearing enemies; reward turning around!
                 if backing_to_spawn:
                     r -= 0.30
